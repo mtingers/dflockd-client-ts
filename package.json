@@ -24,6 +24,7 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
+    "test": "npx tsx --test src/client.test.ts",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

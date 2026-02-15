@@ -77,6 +77,37 @@ function connect(host: string, port: number): Promise<net.Socket> {
 }
 
 // ---------------------------------------------------------------------------
+// CRC32 (same algorithm as Python's zlib.crc32)
+// ---------------------------------------------------------------------------
+
+const CRC32_TABLE = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let c = i;
+  for (let j = 0; j < 8; j++) {
+    c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  }
+  CRC32_TABLE[i] = c;
+}
+
+function crc32(buf: Buffer): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    crc = CRC32_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+// ---------------------------------------------------------------------------
+// Sharding
+// ---------------------------------------------------------------------------
+
+export type ShardingStrategy = (key: string, numServers: number) => number;
+
+export function stableHashShard(key: string, numServers: number): number {
+  return (crc32(Buffer.from(key, "utf-8")) >>> 0) % numServers;
+}
+
+// ---------------------------------------------------------------------------
 // Protocol functions
 // ---------------------------------------------------------------------------
 
@@ -194,8 +225,12 @@ export interface DistributedLockOptions {
   key: string;
   acquireTimeoutS?: number;
   leaseTtlS?: number;
+  /** @deprecated Use `servers` instead. */
   host?: string;
+  /** @deprecated Use `servers` instead. */
   port?: number;
+  servers?: Array<[host: string, port: number]>;
+  shardingStrategy?: ShardingStrategy;
   renewRatio?: number;
 }
 
@@ -203,8 +238,8 @@ export class DistributedLock {
   readonly key: string;
   readonly acquireTimeoutS: number;
   readonly leaseTtlS: number | undefined;
-  readonly host: string;
-  readonly port: number;
+  readonly servers: Array<[string, number]>;
+  readonly shardingStrategy: ShardingStrategy;
   readonly renewRatio: number;
 
   token: string | null = null;
@@ -218,15 +253,30 @@ export class DistributedLock {
     this.key = opts.key;
     this.acquireTimeoutS = opts.acquireTimeoutS ?? 10;
     this.leaseTtlS = opts.leaseTtlS;
-    this.host = opts.host ?? DEFAULT_HOST;
-    this.port = opts.port ?? DEFAULT_PORT;
+
+    if (opts.servers) {
+      if (opts.servers.length === 0) {
+        throw new LockError("servers list must not be empty");
+      }
+      this.servers = opts.servers;
+    } else {
+      this.servers = [[opts.host ?? DEFAULT_HOST, opts.port ?? DEFAULT_PORT]];
+    }
+
+    this.shardingStrategy = opts.shardingStrategy ?? stableHashShard;
     this.renewRatio = opts.renewRatio ?? 0.5;
+  }
+
+  private pickServer(): [string, number] {
+    const idx = this.shardingStrategy(this.key, this.servers.length);
+    return this.servers[idx];
   }
 
   /** Acquire the lock. Returns `true` on success, `false` on timeout. */
   async acquire(): Promise<boolean> {
     this.closed = false;
-    this.sock = await connect(this.host, this.port);
+    const [host, port] = this.pickServer();
+    this.sock = await connect(host, port);
     try {
       const result = await acquire(
         this.sock,
@@ -264,7 +314,8 @@ export class DistributedLock {
    */
   async enqueue(): Promise<"acquired" | "queued"> {
     this.closed = false;
-    this.sock = await connect(this.host, this.port);
+    const [host, port] = this.pickServer();
+    this.sock = await connect(host, port);
     try {
       const result = await enqueue(this.sock, this.key, this.leaseTtlS);
       if (result.status === "acquired") {

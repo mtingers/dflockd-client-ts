@@ -10,10 +10,10 @@ npm install dflockd-client
 
 ## Usage
 
-Start the dflockd server first:
+Start the [dflockd](https://github.com/mtingers/dflockd) server:
 
 ```bash
-uv run dflockd
+dflockd
 ```
 
 ### `withLock` (recommended)
@@ -98,14 +98,58 @@ without blocking. If the lock is contended, `enqueue()` returns `"queued"` and
 
 ### Options
 
-| Option           | Type     | Default       | Description                                      |
-|------------------|----------|---------------|--------------------------------------------------|
-| `key`            | `string` | *(required)*  | Lock name                                        |
-| `acquireTimeoutS`| `number` | `10`          | Seconds to wait for the lock before giving up    |
-| `leaseTtlS`      | `number` | server default| Server-side lease duration in seconds             |
-| `host`           | `string` | `127.0.0.1`   | Server host                                      |
-| `port`           | `number` | `6388`        | Server port                                      |
-| `renewRatio`     | `number` | `0.5`         | Renew at `lease * ratio` seconds (e.g. 50% of TTL)|
+| Option             | Type                          | Default                  | Description                                      |
+|--------------------|-------------------------------|--------------------------|--------------------------------------------------|
+| `key`              | `string`                      | *(required)*             | Lock name                                        |
+| `acquireTimeoutS`  | `number`                      | `10`                     | Seconds to wait for the lock before giving up    |
+| `leaseTtlS`        | `number`                      | server default           | Server-side lease duration in seconds             |
+| `servers`          | `Array<[string, number]>`     | `[["127.0.0.1", 6388]]` | List of `[host, port]` pairs                     |
+| `shardingStrategy` | `ShardingStrategy`            | `stableHashShard`        | Function mapping `(key, numServers)` to a server index |
+| `host`             | `string`                      | `127.0.0.1`              | Server host *(deprecated — use `servers`)*       |
+| `port`             | `number`                      | `6388`                   | Server port *(deprecated — use `servers`)*       |
+| `renewRatio`       | `number`                      | `0.5`                    | Renew at `lease * ratio` seconds (e.g. 50% of TTL)|
+
+### Multi-server sharding
+
+Distribute locks across multiple dflockd instances. Each key is consistently
+routed to the same server using CRC32-based hashing (matching Python's
+`zlib.crc32`).
+
+```ts
+import { DistributedLock } from "dflockd-client";
+
+const lock = new DistributedLock({
+  key: "my-resource",
+  servers: [
+    ["10.0.0.1", 6388],
+    ["10.0.0.2", 6388],
+    ["10.0.0.3", 6388],
+  ],
+});
+
+await lock.withLock(async () => {
+  // critical section — routed to a consistent server based on key
+});
+```
+
+You can supply a custom sharding strategy:
+
+```ts
+import { DistributedLock, ShardingStrategy } from "dflockd-client";
+
+const roundRobin: ShardingStrategy = (_key, numServers) => {
+  return Math.floor(Math.random() * numServers);
+};
+
+const lock = new DistributedLock({
+  key: "my-resource",
+  servers: [
+    ["10.0.0.1", 6388],
+    ["10.0.0.2", 6388],
+  ],
+  shardingStrategy: roundRobin,
+});
+```
 
 ### Error handling
 

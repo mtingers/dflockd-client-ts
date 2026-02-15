@@ -1,6 +1,6 @@
 # dflockd-client
 
-TypeScript client for the [dflockd](https://github.com/matthewfl/dflockd) distributed lock daemon.
+TypeScript client for the [dflockd](https://github.com/mtingers/dflockd) distributed lock daemon.
 
 ## Installation
 

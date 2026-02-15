@@ -1,0 +1,50 @@
+{
+  "name": "dflockd-client",
+  "version": "0.1.0",
+  "description": "TypeScript client for the dflockd distributed lock daemon",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/client.d.ts",
+        "default": "./dist/client.js"
+      },
+      "require": {
+        "types": "./dist/client.d.cts",
+        "default": "./dist/client.cjs"
+      }
+    }
+  },
+  "main": "dist/client.cjs",
+  "module": "dist/client.js",
+  "types": "dist/client.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "distributed-lock",
+    "lock",
+    "mutex",
+    "dflockd",
+    "distributed"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matthewfl/dflockd-client-ts.git"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0"
+  }
+}

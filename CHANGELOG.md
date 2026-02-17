@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.0
+
+- Add `DistributedSemaphore` class with `acquire`, `release`, `withLock`, `enqueue`, and `wait`
+- Add low-level semaphore protocol functions: `semAcquire`, `semRenew`, `semRelease`, `semEnqueue`, `semWaitForLock`
+- Export `DistributedSemaphoreOptions` interface
+- Semaphore supports up to N concurrent holders per key (configurable via `limit`)
+- Semaphore shares the same sharding, auto-renewal, and two-phase enqueue/wait patterns as `DistributedLock`
+
 ## 1.1.0
 
 - Add multi-server sharding with consistent CRC32-based hashing (matches Python's `zlib.crc32`)

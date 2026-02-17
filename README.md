@@ -151,6 +151,90 @@ const lock = new DistributedLock({
 });
 ```
 
+## Semaphore
+
+A semaphore allows up to N concurrent holders per key (instead of exactly 1
+for a lock). The `DistributedSemaphore` API mirrors `DistributedLock`.
+
+### `withLock` (recommended)
+
+```ts
+import { DistributedSemaphore } from "dflockd-client";
+
+const sem = new DistributedSemaphore({ key: "my-resource", limit: 5 });
+
+await sem.withLock(async () => {
+  // critical section — up to 5 concurrent holders
+});
+// slot is released
+```
+
+### Manual `acquire` / `release`
+
+```ts
+import { DistributedSemaphore } from "dflockd-client";
+
+const sem = new DistributedSemaphore({
+  key: "my-resource",
+  limit: 5,
+  acquireTimeoutS: 10,
+  leaseTtlS: 20,
+});
+
+const ok = await sem.acquire(); // true on success, false on timeout
+if (!ok) {
+  console.error("could not acquire semaphore slot");
+  process.exit(1);
+}
+
+try {
+  // critical section — slot is held and auto-renewed
+} finally {
+  await sem.release();
+}
+```
+
+### Two-phase semaphore (enqueue / wait)
+
+```ts
+import { DistributedSemaphore } from "dflockd-client";
+
+const sem = new DistributedSemaphore({
+  key: "my-resource",
+  limit: 5,
+  acquireTimeoutS: 10,
+});
+
+const status = await sem.enqueue(); // "acquired" or "queued"
+console.log(`enqueue status: ${status}`);
+
+const granted = await sem.wait(10); // true on success, false on timeout
+if (!granted) {
+  console.error("timed out waiting for semaphore slot");
+  process.exit(1);
+}
+
+try {
+  // critical section — slot is held and auto-renewed
+} finally {
+  await sem.release();
+}
+```
+
+### Semaphore options
+
+| Option             | Type                          | Default                  | Description                                      |
+|--------------------|-------------------------------|--------------------------|--------------------------------------------------|
+| `key`              | `string`                      | *(required)*             | Semaphore name                                   |
+| `limit`            | `number`                      | *(required)*             | Max concurrent holders                           |
+| `acquireTimeoutS`  | `number`                      | `10`                     | Seconds to wait before giving up                 |
+| `leaseTtlS`        | `number`                      | server default           | Server-side lease duration in seconds             |
+| `servers`          | `Array<[string, number]>`     | `[["127.0.0.1", 6388]]` | List of `[host, port]` pairs                     |
+| `shardingStrategy` | `ShardingStrategy`            | `stableHashShard`        | Function mapping `(key, numServers)` to a server index |
+| `host`             | `string`                      | `127.0.0.1`              | Server host *(deprecated — use `servers`)*       |
+| `port`             | `number`                      | `6388`                   | Server port *(deprecated — use `servers`)*       |
+| `renewRatio`       | `number`                      | `0.5`                    | Renew at `lease * ratio` seconds (e.g. 50% of TTL)|
+
 ### Error handling
 
 ```ts
@@ -173,19 +257,33 @@ For cases where you manage the socket yourself:
 
 ```ts
 import * as net from "net";
-import { acquire, enqueue, waitForLock, renew, release } from "dflockd-client";
+import {
+  acquire, enqueue, waitForLock, renew, release,
+  semAcquire, semEnqueue, semWaitForLock, semRenew, semRelease,
+} from "dflockd-client";
 
 const sock = net.createConnection({ host: "127.0.0.1", port: 6388 });
 
-// Single-phase
+// Lock — single-phase
 const { token, lease } = await acquire(sock, "my-key", 10);
 const remaining = await renew(sock, "my-key", token, 60);
 await release(sock, "my-key", token);
 
-// Two-phase
+// Lock — two-phase
 const result = await enqueue(sock, "another-key");   // { status, token, lease }
 if (result.status === "queued") {
   const granted = await waitForLock(sock, "another-key", 10); // { token, lease }
+}
+
+// Semaphore — single-phase (limit = 5)
+const sem = await semAcquire(sock, "sem-key", 10, 5); // { token, lease }
+const semRemaining = await semRenew(sock, "sem-key", sem.token, 60);
+await semRelease(sock, "sem-key", sem.token);
+
+// Semaphore — two-phase
+const semResult = await semEnqueue(sock, "sem-key", 5); // { status, token, lease }
+if (semResult.status === "queued") {
+  const semGranted = await semWaitForLock(sock, "sem-key", 10); // { token, lease }
 }
 
 sock.destroy();

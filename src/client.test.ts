@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import * as assert from "node:assert/strict";
 import {
   DistributedLock,
+  DistributedSemaphore,
   AcquireTimeoutError,
   LockError,
   stableHashShard,
@@ -206,6 +207,227 @@ describe("integration: enqueue / wait", () => {
       assert.equal(ok, false);
     } finally {
       await holder.release();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DistributedSemaphore constructor validation
+// ---------------------------------------------------------------------------
+
+describe("DistributedSemaphore constructor", () => {
+  it("defaults to 127.0.0.1:6388 when no servers/host/port given", () => {
+    const sem = new DistributedSemaphore({ key: "k", limit: 3 });
+    assert.deepEqual(sem.servers, [["127.0.0.1", 6388]]);
+  });
+
+  it("accepts deprecated host/port and maps to servers", () => {
+    const sem = new DistributedSemaphore({ key: "k", limit: 3, host: "10.0.0.1", port: 9999 });
+    assert.deepEqual(sem.servers, [["10.0.0.1", 9999]]);
+  });
+
+  it("accepts a servers array", () => {
+    const servers: Array<[string, number]> = [
+      ["10.0.0.1", 6388],
+      ["10.0.0.2", 6389],
+    ];
+    const sem = new DistributedSemaphore({ key: "k", limit: 3, servers });
+    assert.deepEqual(sem.servers, servers);
+  });
+
+  it("throws on empty servers array", () => {
+    assert.throws(
+      () => new DistributedSemaphore({ key: "k", limit: 3, servers: [] }),
+      LockError,
+    );
+  });
+
+  it("uses stableHashShard by default", () => {
+    const sem = new DistributedSemaphore({ key: "k", limit: 3 });
+    assert.equal(sem.shardingStrategy, stableHashShard);
+  });
+
+  it("accepts a custom sharding strategy", () => {
+    const custom = (_key: string, _n: number) => 0;
+    const sem = new DistributedSemaphore({ key: "k", limit: 3, shardingStrategy: custom });
+    assert.equal(sem.shardingStrategy, custom);
+  });
+
+  it("stores the limit", () => {
+    const sem = new DistributedSemaphore({ key: "k", limit: 5 });
+    assert.equal(sem.limit, 5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration tests — semaphore (require a running dflockd on 127.0.0.1:6388)
+// ---------------------------------------------------------------------------
+
+describe("integration: semaphore acquire / release", () => {
+  it("acquires and releases a semaphore slot", async () => {
+    const sem = new DistributedSemaphore({ key: "test-sem-acq-rel", limit: 3 });
+    const ok = await sem.acquire();
+    assert.equal(ok, true);
+    assert.ok(sem.token !== null);
+    await sem.release();
+    assert.equal(sem.token, null);
+  });
+
+  it("allows multiple concurrent holders up to limit", async () => {
+    const sems = Array.from({ length: 3 }, () =>
+      new DistributedSemaphore({ key: "test-sem-multi", limit: 3 }),
+    );
+
+    for (const sem of sems) {
+      assert.equal(await sem.acquire(), true);
+    }
+
+    // All three should be holding simultaneously
+    for (const sem of sems) {
+      assert.ok(sem.token !== null);
+    }
+
+    for (const sem of sems) {
+      await sem.release();
+    }
+  });
+
+  it("returns false on acquire timeout when all slots are held", async () => {
+    const holders = Array.from({ length: 2 }, () =>
+      new DistributedSemaphore({ key: "test-sem-timeout", limit: 2 }),
+    );
+
+    for (const h of holders) {
+      assert.equal(await h.acquire(), true);
+    }
+
+    try {
+      const waiter = new DistributedSemaphore({
+        key: "test-sem-timeout",
+        limit: 2,
+        acquireTimeoutS: 1,
+      });
+      const ok = await waiter.acquire();
+      assert.equal(ok, false);
+    } finally {
+      for (const h of holders) {
+        await h.release();
+      }
+    }
+  });
+});
+
+describe("integration: semaphore withLock", () => {
+  it("runs the callback and releases", async () => {
+    const sem = new DistributedSemaphore({ key: "test-sem-withlock", limit: 3 });
+    let ran = false;
+    await sem.withLock(async () => {
+      ran = true;
+      assert.ok(sem.token !== null);
+    });
+    assert.equal(ran, true);
+    assert.equal(sem.token, null);
+  });
+
+  it("releases even when the callback throws", async () => {
+    const sem = new DistributedSemaphore({ key: "test-sem-withlock-throw", limit: 3 });
+    await assert.rejects(
+      () =>
+        sem.withLock(async () => {
+          throw new Error("boom");
+        }),
+      { message: "boom" },
+    );
+    assert.equal(sem.token, null);
+  });
+
+  it("throws AcquireTimeoutError when all slots are held", async () => {
+    const holders = Array.from({ length: 2 }, () =>
+      new DistributedSemaphore({ key: "test-sem-withlock-timeout", limit: 2 }),
+    );
+
+    for (const h of holders) {
+      assert.equal(await h.acquire(), true);
+    }
+
+    try {
+      const waiter = new DistributedSemaphore({
+        key: "test-sem-withlock-timeout",
+        limit: 2,
+        acquireTimeoutS: 1,
+      });
+      await assert.rejects(
+        () => waiter.withLock(async () => {}),
+        (err: unknown) => err instanceof AcquireTimeoutError,
+      );
+    } finally {
+      for (const h of holders) {
+        await h.release();
+      }
+    }
+  });
+});
+
+describe("integration: semaphore enqueue / wait", () => {
+  it("acquires immediately when slots are free", async () => {
+    const sem = new DistributedSemaphore({ key: "test-sem-enq-free", limit: 3 });
+    const status = await sem.enqueue();
+    assert.equal(status, "acquired");
+    assert.ok(sem.token !== null);
+
+    const ok = await sem.wait();
+    assert.equal(ok, true);
+
+    await sem.release();
+  });
+
+  it("queues and then grants when a slot opens", async () => {
+    const holders = Array.from({ length: 2 }, () =>
+      new DistributedSemaphore({ key: "test-sem-enq-wait", limit: 2 }),
+    );
+    for (const h of holders) {
+      assert.equal(await h.acquire(), true);
+    }
+
+    const waiter = new DistributedSemaphore({
+      key: "test-sem-enq-wait",
+      limit: 2,
+      acquireTimeoutS: 5,
+    });
+    const status = await waiter.enqueue();
+    assert.equal(status, "queued");
+    assert.equal(waiter.token, null);
+
+    // Release one holder so waiter can proceed
+    setTimeout(() => holders[0].release(), 200);
+
+    const ok = await waiter.wait(5);
+    assert.equal(ok, true);
+    assert.ok(waiter.token !== null);
+
+    await waiter.release();
+    await holders[1].release();
+  });
+
+  it("returns false on wait timeout", async () => {
+    const holders = Array.from({ length: 2 }, () =>
+      new DistributedSemaphore({ key: "test-sem-enq-timeout", limit: 2 }),
+    );
+    for (const h of holders) {
+      assert.equal(await h.acquire(), true);
+    }
+
+    try {
+      const waiter = new DistributedSemaphore({ key: "test-sem-enq-timeout", limit: 2 });
+      const status = await waiter.enqueue();
+      assert.equal(status, "queued");
+
+      const ok = await waiter.wait(1);
+      assert.equal(ok, false);
+    } finally {
+      for (const h of holders) {
+        await h.release();
+      }
     }
   });
 });

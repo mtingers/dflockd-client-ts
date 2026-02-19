@@ -4,6 +4,7 @@ import {
   DistributedLock,
   DistributedSemaphore,
   AcquireTimeoutError,
+  AuthError,
   LockError,
   stableHashShard,
   stats,
@@ -112,6 +113,43 @@ describe("DistributedSemaphore tls option", () => {
   it("defaults tls to undefined when not provided", () => {
     const sem = new DistributedSemaphore({ key: "k", limit: 3 });
     assert.equal(sem.tls, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auth option (no server needed)
+// ---------------------------------------------------------------------------
+
+describe("DistributedLock auth option", () => {
+  it("stores auth option on the instance", () => {
+    const lock = new DistributedLock({ key: "k", auth: "my-secret" });
+    assert.equal(lock.auth, "my-secret");
+  });
+
+  it("defaults auth to undefined when not provided", () => {
+    const lock = new DistributedLock({ key: "k" });
+    assert.equal(lock.auth, undefined);
+  });
+});
+
+describe("DistributedSemaphore auth option", () => {
+  it("stores auth option on the instance", () => {
+    const sem = new DistributedSemaphore({ key: "k", limit: 3, auth: "my-secret" });
+    assert.equal(sem.auth, "my-secret");
+  });
+
+  it("defaults auth to undefined when not provided", () => {
+    const sem = new DistributedSemaphore({ key: "k", limit: 3 });
+    assert.equal(sem.auth, undefined);
+  });
+});
+
+describe("AuthError", () => {
+  it("is an instance of LockError", () => {
+    const err = new AuthError();
+    assert.ok(err instanceof LockError);
+    assert.equal(err.name, "AuthError");
+    assert.equal(err.message, "authentication failed");
   });
 });
 

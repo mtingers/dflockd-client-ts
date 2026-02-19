@@ -22,6 +22,13 @@ export class LockError extends Error {
   }
 }
 
+export class AuthError extends LockError {
+  constructor() {
+    super("authentication failed");
+    this.name = "AuthError";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Low-level helpers
 // ---------------------------------------------------------------------------
@@ -70,22 +77,36 @@ function readline(sock: net.Socket): Promise<string> {
   });
 }
 
-function connect(
+async function connect(
   host: string,
   port: number,
   tlsOptions?: tls.ConnectionOptions,
+  auth?: string,
 ): Promise<net.Socket> {
-  return new Promise((resolve, reject) => {
+  const sock = await new Promise<net.Socket>((resolve, reject) => {
     if (tlsOptions) {
-      const sock = tls.connect({ host, port, ...tlsOptions }, () =>
-        resolve(sock),
-      );
-      sock.on("error", reject);
+      const s = tls.connect({ host, port, ...tlsOptions }, () => resolve(s));
+      s.on("error", reject);
     } else {
-      const sock = net.createConnection({ host, port }, () => resolve(sock));
-      sock.on("error", reject);
+      const s = net.createConnection({ host, port }, () => resolve(s));
+      s.on("error", reject);
     }
   });
+
+  if (auth != null) {
+    sock.write(encodeLines("auth", "_", auth));
+    const resp = await readline(sock);
+    if (resp === "ok") {
+      return sock;
+    }
+    sock.destroy();
+    if (resp === "error_auth") {
+      throw new AuthError();
+    }
+    throw new LockError(`auth failed: '${resp}'`);
+  }
+
+  return sock;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,11 +426,11 @@ async function statsProto(sock: net.Socket): Promise<Stats> {
  * ```
  */
 export async function stats(
-  options?: { host?: string; port?: number; tls?: tls.ConnectionOptions },
+  options?: { host?: string; port?: number; tls?: tls.ConnectionOptions; auth?: string },
 ): Promise<Stats> {
   const host = options?.host ?? DEFAULT_HOST;
   const port = options?.port ?? DEFAULT_PORT;
-  const sock = await connect(host, port, options?.tls);
+  const sock = await connect(host, port, options?.tls, options?.auth);
   try {
     return await statsProto(sock);
   } finally {
@@ -433,6 +454,7 @@ export interface DistributedLockOptions {
   shardingStrategy?: ShardingStrategy;
   renewRatio?: number;
   tls?: tls.ConnectionOptions;
+  auth?: string;
 }
 
 export class DistributedLock {
@@ -443,6 +465,7 @@ export class DistributedLock {
   readonly shardingStrategy: ShardingStrategy;
   readonly renewRatio: number;
   readonly tls: tls.ConnectionOptions | undefined;
+  readonly auth: string | undefined;
 
   token: string | null = null;
   lease: number = 0;
@@ -456,6 +479,7 @@ export class DistributedLock {
     this.acquireTimeoutS = opts.acquireTimeoutS ?? 10;
     this.leaseTtlS = opts.leaseTtlS;
     this.tls = opts.tls;
+    this.auth = opts.auth;
 
     if (opts.servers) {
       if (opts.servers.length === 0) {
@@ -479,7 +503,7 @@ export class DistributedLock {
   async acquire(): Promise<boolean> {
     this.closed = false;
     const [host, port] = this.pickServer();
-    this.sock = await connect(host, port, this.tls);
+    this.sock = await connect(host, port, this.tls, this.auth);
     try {
       const result = await acquire(
         this.sock,
@@ -518,7 +542,7 @@ export class DistributedLock {
   async enqueue(): Promise<"acquired" | "queued"> {
     this.closed = false;
     const [host, port] = this.pickServer();
-    this.sock = await connect(host, port, this.tls);
+    this.sock = await connect(host, port, this.tls, this.auth);
     try {
       const result = await enqueue(this.sock, this.key, this.leaseTtlS);
       if (result.status === "acquired") {
@@ -639,6 +663,7 @@ export interface DistributedSemaphoreOptions {
   shardingStrategy?: ShardingStrategy;
   renewRatio?: number;
   tls?: tls.ConnectionOptions;
+  auth?: string;
 }
 
 export class DistributedSemaphore {
@@ -650,6 +675,7 @@ export class DistributedSemaphore {
   readonly shardingStrategy: ShardingStrategy;
   readonly renewRatio: number;
   readonly tls: tls.ConnectionOptions | undefined;
+  readonly auth: string | undefined;
 
   token: string | null = null;
   lease: number = 0;
@@ -664,6 +690,7 @@ export class DistributedSemaphore {
     this.acquireTimeoutS = opts.acquireTimeoutS ?? 10;
     this.leaseTtlS = opts.leaseTtlS;
     this.tls = opts.tls;
+    this.auth = opts.auth;
 
     if (opts.servers) {
       if (opts.servers.length === 0) {
@@ -687,7 +714,7 @@ export class DistributedSemaphore {
   async acquire(): Promise<boolean> {
     this.closed = false;
     const [host, port] = this.pickServer();
-    this.sock = await connect(host, port, this.tls);
+    this.sock = await connect(host, port, this.tls, this.auth);
     try {
       const result = await semAcquire(
         this.sock,
@@ -727,7 +754,7 @@ export class DistributedSemaphore {
   async enqueue(): Promise<"acquired" | "queued"> {
     this.closed = false;
     const [host, port] = this.pickServer();
-    this.sock = await connect(host, port, this.tls);
+    this.sock = await connect(host, port, this.tls, this.auth);
     try {
       const result = await semEnqueue(this.sock, this.key, this.limit, this.leaseTtlS);
       if (result.status === "acquired") {

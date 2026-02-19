@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.0
+
+- Add `auth` option to `DistributedLock`, `DistributedSemaphore`, and `stats()` for token-based authentication (`--auth-token`)
+- Add `AuthError` class (extends `LockError`) thrown on authentication failure
+
 ## 1.5.0
 
 - Add `tls` option to `DistributedLock`, `DistributedSemaphore`, and `stats()` for TLS-encrypted connections

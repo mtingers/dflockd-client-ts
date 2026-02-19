@@ -109,6 +109,7 @@ without blocking. If the lock is contended, `enqueue()` returns `"queued"` and
 | `port`             | `number`                      | `6388`                   | Server port *(deprecated — use `servers`)*       |
 | `renewRatio`       | `number`                      | `0.5`                    | Renew at `lease * ratio` seconds (e.g. 50% of TTL)|
 | `tls`              | `tls.ConnectionOptions`       | `undefined`              | TLS options; pass `{}` for default system CA       |
+| `auth`             | `string`                      | `undefined`              | Auth token for servers started with `--auth-token` |
 
 ### Multi-server sharding
 
@@ -236,6 +237,7 @@ try {
 | `port`             | `number`                      | `6388`                   | Server port *(deprecated — use `servers`)*       |
 | `renewRatio`       | `number`                      | `0.5`                    | Renew at `lease * ratio` seconds (e.g. 50% of TTL)|
 | `tls`              | `tls.ConnectionOptions`       | `undefined`              | TLS options; pass `{}` for default system CA       |
+| `auth`             | `string`                      | `undefined`              | Auth token for servers started with `--auth-token` |
 
 ## Stats
 
@@ -291,16 +293,46 @@ const sem = new DistributedSemaphore({ key: "my-resource", limit: 5, tls: {} });
 const s = await stats({ host: "10.0.0.1", port: 6388, tls: {} });
 ```
 
+## Authentication
+
+When the dflockd server is started with `--auth-token`, every connection must
+authenticate before sending any other command. Pass the `auth` option to enable
+token-based authentication:
+
+```ts
+import { DistributedLock, DistributedSemaphore, stats } from "dflockd-client";
+
+// Lock with auth
+const lock = new DistributedLock({ key: "my-resource", auth: "my-secret-token" });
+
+// Semaphore with auth
+const sem = new DistributedSemaphore({ key: "my-resource", limit: 5, auth: "my-secret-token" });
+
+// Stats with auth
+const s = await stats({ host: "10.0.0.1", port: 6388, auth: "my-secret-token" });
+
+// Combined with TLS
+const secureLock = new DistributedLock({
+  key: "my-resource",
+  tls: {},
+  auth: "my-secret-token",
+});
+```
+
+If authentication fails, an `AuthError` (a subclass of `LockError`) is thrown.
+
 ### Error handling
 
 ```ts
-import { DistributedLock, AcquireTimeoutError, LockError } from "dflockd-client";
+import { DistributedLock, AcquireTimeoutError, AuthError, LockError } from "dflockd-client";
 
 try {
   await lock.withLock(async () => { /* ... */ });
 } catch (err) {
   if (err instanceof AcquireTimeoutError) {
     // lock could not be acquired within acquireTimeoutS
+  } else if (err instanceof AuthError) {
+    // authentication failed (bad or missing token)
   } else if (err instanceof LockError) {
     // protocol-level error (bad token, server disconnect, etc.)
   }

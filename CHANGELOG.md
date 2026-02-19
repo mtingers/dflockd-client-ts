@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.0
+
+- Add `tls` option to `DistributedLock`, `DistributedSemaphore`, and `stats()` for TLS-encrypted connections
+
 ## 1.4.0
 
 - Add `stats()` function to query server runtime statistics (connections, locks, semaphores, idle entries)

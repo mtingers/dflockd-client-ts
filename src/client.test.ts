@@ -86,6 +86,36 @@ describe("DistributedLock constructor", () => {
 });
 
 // ---------------------------------------------------------------------------
+// TLS option (no server needed)
+// ---------------------------------------------------------------------------
+
+describe("DistributedLock tls option", () => {
+  it("stores tls option on the instance", () => {
+    const tlsOpts = { rejectUnauthorized: false };
+    const lock = new DistributedLock({ key: "k", tls: tlsOpts });
+    assert.deepEqual(lock.tls, tlsOpts);
+  });
+
+  it("defaults tls to undefined when not provided", () => {
+    const lock = new DistributedLock({ key: "k" });
+    assert.equal(lock.tls, undefined);
+  });
+});
+
+describe("DistributedSemaphore tls option", () => {
+  it("stores tls option on the instance", () => {
+    const tlsOpts = { rejectUnauthorized: false };
+    const sem = new DistributedSemaphore({ key: "k", limit: 3, tls: tlsOpts });
+    assert.deepEqual(sem.tls, tlsOpts);
+  });
+
+  it("defaults tls to undefined when not provided", () => {
+    const sem = new DistributedSemaphore({ key: "k", limit: 3 });
+    assert.equal(sem.tls, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Integration tests (require a running dflockd on 127.0.0.1:6388)
 // ---------------------------------------------------------------------------
 

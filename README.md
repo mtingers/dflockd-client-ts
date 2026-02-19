@@ -108,6 +108,7 @@ without blocking. If the lock is contended, `enqueue()` returns `"queued"` and
 | `host`             | `string`                      | `127.0.0.1`              | Server host *(deprecated — use `servers`)*       |
 | `port`             | `number`                      | `6388`                   | Server port *(deprecated — use `servers`)*       |
 | `renewRatio`       | `number`                      | `0.5`                    | Renew at `lease * ratio` seconds (e.g. 50% of TTL)|
+| `tls`              | `tls.ConnectionOptions`       | `undefined`              | TLS options; pass `{}` for default system CA       |
 
 ### Multi-server sharding
 
@@ -234,6 +235,7 @@ try {
 | `host`             | `string`                      | `127.0.0.1`              | Server host *(deprecated — use `servers`)*       |
 | `port`             | `number`                      | `6388`                   | Server port *(deprecated — use `servers`)*       |
 | `renewRatio`       | `number`                      | `0.5`                    | Renew at `lease * ratio` seconds (e.g. 50% of TTL)|
+| `tls`              | `tls.ConnectionOptions`       | `undefined`              | TLS options; pass `{}` for default system CA       |
 
 ## Stats
 
@@ -261,6 +263,32 @@ Pass `{ host, port }` to query a specific server:
 
 ```ts
 const s = await stats({ host: "10.0.0.1", port: 6388 });
+```
+
+## TLS
+
+When the dflockd server is started with `--tls-cert` and `--tls-key`, all
+connections must use TLS. Pass a `tls` option (accepting Node's
+`tls.ConnectionOptions`) to enable TLS on the client:
+
+```ts
+import { DistributedLock, DistributedSemaphore, stats } from "dflockd-client";
+
+// TLS with default system CA validation
+const lock = new DistributedLock({ key: "my-resource", tls: {} });
+
+// Self-signed CA
+import * as fs from "fs";
+const lock2 = new DistributedLock({
+  key: "my-resource",
+  tls: { ca: fs.readFileSync("ca.pem") },
+});
+
+// Semaphore over TLS
+const sem = new DistributedSemaphore({ key: "my-resource", limit: 5, tls: {} });
+
+// Stats over TLS
+const s = await stats({ host: "10.0.0.1", port: 6388, tls: {} });
 ```
 
 ### Error handling

@@ -1,4 +1,5 @@
 import * as net from "net";
+import * as tls from "tls";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 6388;
@@ -69,10 +70,21 @@ function readline(sock: net.Socket): Promise<string> {
   });
 }
 
-function connect(host: string, port: number): Promise<net.Socket> {
+function connect(
+  host: string,
+  port: number,
+  tlsOptions?: tls.ConnectionOptions,
+): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const sock = net.createConnection({ host, port }, () => resolve(sock));
-    sock.on("error", reject);
+    if (tlsOptions) {
+      const sock = tls.connect({ host, port, ...tlsOptions }, () =>
+        resolve(sock),
+      );
+      sock.on("error", reject);
+    } else {
+      const sock = net.createConnection({ host, port }, () => resolve(sock));
+      sock.on("error", reject);
+    }
   });
 }
 
@@ -393,11 +405,11 @@ async function statsProto(sock: net.Socket): Promise<Stats> {
  * ```
  */
 export async function stats(
-  options?: { host?: string; port?: number },
+  options?: { host?: string; port?: number; tls?: tls.ConnectionOptions },
 ): Promise<Stats> {
   const host = options?.host ?? DEFAULT_HOST;
   const port = options?.port ?? DEFAULT_PORT;
-  const sock = await connect(host, port);
+  const sock = await connect(host, port, options?.tls);
   try {
     return await statsProto(sock);
   } finally {
@@ -420,6 +432,7 @@ export interface DistributedLockOptions {
   servers?: Array<[host: string, port: number]>;
   shardingStrategy?: ShardingStrategy;
   renewRatio?: number;
+  tls?: tls.ConnectionOptions;
 }
 
 export class DistributedLock {
@@ -429,6 +442,7 @@ export class DistributedLock {
   readonly servers: Array<[string, number]>;
   readonly shardingStrategy: ShardingStrategy;
   readonly renewRatio: number;
+  readonly tls: tls.ConnectionOptions | undefined;
 
   token: string | null = null;
   lease: number = 0;
@@ -441,6 +455,7 @@ export class DistributedLock {
     this.key = opts.key;
     this.acquireTimeoutS = opts.acquireTimeoutS ?? 10;
     this.leaseTtlS = opts.leaseTtlS;
+    this.tls = opts.tls;
 
     if (opts.servers) {
       if (opts.servers.length === 0) {
@@ -464,7 +479,7 @@ export class DistributedLock {
   async acquire(): Promise<boolean> {
     this.closed = false;
     const [host, port] = this.pickServer();
-    this.sock = await connect(host, port);
+    this.sock = await connect(host, port, this.tls);
     try {
       const result = await acquire(
         this.sock,
@@ -503,7 +518,7 @@ export class DistributedLock {
   async enqueue(): Promise<"acquired" | "queued"> {
     this.closed = false;
     const [host, port] = this.pickServer();
-    this.sock = await connect(host, port);
+    this.sock = await connect(host, port, this.tls);
     try {
       const result = await enqueue(this.sock, this.key, this.leaseTtlS);
       if (result.status === "acquired") {
@@ -623,6 +638,7 @@ export interface DistributedSemaphoreOptions {
   servers?: Array<[host: string, port: number]>;
   shardingStrategy?: ShardingStrategy;
   renewRatio?: number;
+  tls?: tls.ConnectionOptions;
 }
 
 export class DistributedSemaphore {
@@ -633,6 +649,7 @@ export class DistributedSemaphore {
   readonly servers: Array<[string, number]>;
   readonly shardingStrategy: ShardingStrategy;
   readonly renewRatio: number;
+  readonly tls: tls.ConnectionOptions | undefined;
 
   token: string | null = null;
   lease: number = 0;
@@ -646,6 +663,7 @@ export class DistributedSemaphore {
     this.limit = opts.limit;
     this.acquireTimeoutS = opts.acquireTimeoutS ?? 10;
     this.leaseTtlS = opts.leaseTtlS;
+    this.tls = opts.tls;
 
     if (opts.servers) {
       if (opts.servers.length === 0) {
@@ -669,7 +687,7 @@ export class DistributedSemaphore {
   async acquire(): Promise<boolean> {
     this.closed = false;
     const [host, port] = this.pickServer();
-    this.sock = await connect(host, port);
+    this.sock = await connect(host, port, this.tls);
     try {
       const result = await semAcquire(
         this.sock,
@@ -709,7 +727,7 @@ export class DistributedSemaphore {
   async enqueue(): Promise<"acquired" | "queued"> {
     this.closed = false;
     const [host, port] = this.pickServer();
-    this.sock = await connect(host, port);
+    this.sock = await connect(host, port, this.tls);
     try {
       const result = await semEnqueue(this.sock, this.key, this.limit, this.leaseTtlS);
       if (result.status === "acquired") {

@@ -235,6 +235,34 @@ try {
 | `port`             | `number`                      | `6388`                   | Server port *(deprecated — use `servers`)*       |
 | `renewRatio`       | `number`                      | `0.5`                    | Renew at `lease * ratio` seconds (e.g. 50% of TTL)|
 
+## Stats
+
+Query server runtime statistics (active connections, held locks, semaphores,
+idle entries).
+
+```ts
+import { stats } from "dflockd-client";
+
+const s = await stats();
+console.log(`connections: ${s.connections}`);
+console.log(`locks held: ${s.locks.length}`);
+console.log(`semaphores active: ${s.semaphores.length}`);
+
+for (const lock of s.locks) {
+  console.log(`  ${lock.key} owner=${lock.owner_conn_id} expires_in=${lock.lease_expires_in_s}s waiters=${lock.waiters}`);
+}
+
+for (const sem of s.semaphores) {
+  console.log(`  ${sem.key} holders=${sem.holders}/${sem.limit} waiters=${sem.waiters}`);
+}
+```
+
+Pass `{ host, port }` to query a specific server:
+
+```ts
+const s = await stats({ host: "10.0.0.1", port: 6388 });
+```
+
 ### Error handling
 
 ```ts
@@ -260,6 +288,7 @@ import * as net from "net";
 import {
   acquire, enqueue, waitForLock, renew, release,
   semAcquire, semEnqueue, semWaitForLock, semRenew, semRelease,
+  stats,
 } from "dflockd-client";
 
 const sock = net.createConnection({ host: "127.0.0.1", port: 6388 });

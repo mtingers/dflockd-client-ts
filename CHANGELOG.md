@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.0
+
+- Add `stats()` function to query server runtime statistics (connections, locks, semaphores, idle entries)
+- Export `Stats`, `StatsLock`, `StatsSemaphore`, `StatsIdleLock`, `StatsIdleSemaphore` interfaces
+
 ## 1.2.0
 
 - Add `DistributedSemaphore` class with `acquire`, `release`, `withLock`, `enqueue`, and `wait`

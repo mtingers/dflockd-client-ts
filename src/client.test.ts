@@ -6,6 +6,7 @@ import {
   AcquireTimeoutError,
   LockError,
   stableHashShard,
+  stats,
 } from "./client.js";
 
 // ---------------------------------------------------------------------------
@@ -428,6 +429,53 @@ describe("integration: semaphore enqueue / wait", () => {
       for (const h of holders) {
         await h.release();
       }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration tests — stats (require a running dflockd on 127.0.0.1:6388)
+// ---------------------------------------------------------------------------
+
+describe("integration: stats", () => {
+  it("returns stats with expected shape", async () => {
+    const s = await stats();
+    assert.equal(typeof s.connections, "number");
+    assert.ok(Array.isArray(s.locks));
+    assert.ok(Array.isArray(s.semaphores));
+    assert.ok(Array.isArray(s.idle_locks));
+    assert.ok(Array.isArray(s.idle_semaphores));
+  });
+
+  it("reflects a held lock", async () => {
+    const lock = new DistributedLock({ key: "test-stats-lock" });
+    assert.equal(await lock.acquire(), true);
+
+    try {
+      const s = await stats();
+      const entry = s.locks.find((l) => l.key === "test-stats-lock");
+      assert.ok(entry, "held lock should appear in stats");
+      assert.equal(typeof entry.owner_conn_id, "number");
+      assert.equal(typeof entry.lease_expires_in_s, "number");
+      assert.equal(typeof entry.waiters, "number");
+    } finally {
+      await lock.release();
+    }
+  });
+
+  it("reflects a held semaphore", async () => {
+    const sem = new DistributedSemaphore({ key: "test-stats-sem", limit: 3 });
+    assert.equal(await sem.acquire(), true);
+
+    try {
+      const s = await stats();
+      const entry = s.semaphores.find((e) => e.key === "test-stats-sem");
+      assert.ok(entry, "held semaphore should appear in stats");
+      assert.equal(entry.limit, 3);
+      assert.equal(entry.holders, 1);
+      assert.equal(typeof entry.waiters, "number");
+    } finally {
+      await sem.release();
     }
   });
 });

@@ -108,6 +108,42 @@ export function stableHashShard(key: string, numServers: number): number {
 }
 
 // ---------------------------------------------------------------------------
+// Stats types
+// ---------------------------------------------------------------------------
+
+export interface StatsLock {
+  key: string;
+  owner_conn_id: number;
+  lease_expires_in_s: number;
+  waiters: number;
+}
+
+export interface StatsSemaphore {
+  key: string;
+  limit: number;
+  holders: number;
+  waiters: number;
+}
+
+export interface StatsIdleLock {
+  key: string;
+  idle_s: number;
+}
+
+export interface StatsIdleSemaphore {
+  key: string;
+  idle_s: number;
+}
+
+export interface Stats {
+  connections: number;
+  locks: StatsLock[];
+  semaphores: StatsSemaphore[];
+  idle_locks: StatsIdleLock[];
+  idle_semaphores: StatsIdleSemaphore[];
+}
+
+// ---------------------------------------------------------------------------
 // Protocol functions
 // ---------------------------------------------------------------------------
 
@@ -326,6 +362,46 @@ export async function semRelease(
   const resp = await readline(sock);
   if (resp !== "ok") {
     throw new LockError(`sem_release failed: '${resp}'`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stats protocol function
+// ---------------------------------------------------------------------------
+
+async function statsProto(sock: net.Socket): Promise<Stats> {
+  sock.write(encodeLines("stats", "_", ""));
+
+  const resp = await readline(sock);
+  if (!resp.startsWith("ok ")) {
+    throw new LockError(`stats failed: '${resp}'`);
+  }
+
+  const json = resp.slice(3);
+  return JSON.parse(json) as Stats;
+}
+
+/**
+ * Query server runtime statistics.
+ *
+ * Opens a short-lived connection, sends the `stats` command, and returns
+ * the parsed response.
+ *
+ * ```ts
+ * const s = await stats();
+ * console.log(s.connections, s.locks.length);
+ * ```
+ */
+export async function stats(
+  options?: { host?: string; port?: number },
+): Promise<Stats> {
+  const host = options?.host ?? DEFAULT_HOST;
+  const port = options?.port ?? DEFAULT_PORT;
+  const sock = await connect(host, port);
+  try {
+    return await statsProto(sock);
+  } finally {
+    sock.destroy();
   }
 }
 

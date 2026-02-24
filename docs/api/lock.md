@@ -29,6 +29,7 @@ const lock = new DistributedLock({
 | `renewRatio`       | `number`                      | `0.5`                    | Renew at `lease * ratio` seconds (e.g. 50% of TTL)|
 | `tls`              | `tls.ConnectionOptions`       | `undefined`              | TLS options; pass `{}` for default system CA       |
 | `auth`             | `string`                      | `undefined`              | Auth token for servers started with `--auth-token` |
+| `onLockLost`       | `(key: string, token: string) => void` | `undefined`     | Called when background lease renewal fails and the lock is lost |
 
 ## Methods
 

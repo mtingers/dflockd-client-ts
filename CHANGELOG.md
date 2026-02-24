@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.8.0
+
+### Features
+
+- Add `onLockLost` callback option to `DistributedLock` and `DistributedSemaphore`, called when background lease renewal fails
+
+### Bug fixes
+
+- `AcquireTimeoutError` now extends `LockError` (was `Error`), so `catch (err instanceof LockError)` catches timeouts too
+- `readline` now persists leftover bytes between calls, fixing data loss when the server sends multiple lines in a single TCP segment
+- `connect` removes the temporary `error` listener after a successful connection, preventing listener leaks
+- Add a no-op `error` listener on sockets after connect to prevent unhandled `error` event crashes
+- `renew` and `semRenew` throw `LockError` on malformed server responses instead of silently returning `-1`
+- `acquire()` and `enqueue()` now close any existing connection first, preventing socket leaks when reusing a `DistributedLock` or `DistributedSemaphore` instance
+- `auth` option no longer sends an auth command for empty strings
+- `shardingStrategy` return value is now validated; out-of-bounds or non-integer values throw `LockError`
+
 ## 1.6.0
 
 - Add `auth` option to `DistributedLock`, `DistributedSemaphore`, and `stats()` for token-based authentication (`--auth-token`)

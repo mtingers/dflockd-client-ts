@@ -14,7 +14,7 @@ import { LockError } from "dflockd-client";
 
 ### `AcquireTimeoutError`
 
-Thrown when a lock or semaphore slot cannot be acquired within the configured timeout. Extends `Error` (not `LockError`).
+Thrown when a lock or semaphore slot cannot be acquired within the configured timeout. Extends `LockError`.
 
 ```ts
 import { AcquireTimeoutError } from "dflockd-client";

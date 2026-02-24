@@ -72,3 +72,5 @@ The type signature:
 ```ts
 type ShardingStrategy = (key: string, numServers: number) => number;
 ```
+
+The returned index must be an integer in `[0, numServers)`. A `LockError` is thrown if the value is out of bounds, negative, or not an integer.

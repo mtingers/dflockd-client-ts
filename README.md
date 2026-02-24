@@ -2,6 +2,8 @@
 
 TypeScript client for the [dflockd](https://github.com/mtingers/dflockd) distributed lock daemon.
 
+**[Documentation](https://mtingers.github.io/dflockd-client-ts/)**
+
 ## Installation
 
 ```bash

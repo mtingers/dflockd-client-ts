@@ -737,8 +737,8 @@ abstract class DistributedPrimitive {
     this.shardingStrategy = opts.shardingStrategy ?? stableHashShard;
 
     const renewRatio = opts.renewRatio ?? 0.5;
-    if (renewRatio <= 0 || renewRatio >= 1) {
-      throw new LockError("renewRatio must be between 0 and 1 (exclusive)");
+    if (!Number.isFinite(renewRatio) || renewRatio <= 0 || renewRatio >= 1) {
+      throw new LockError("renewRatio must be a finite number between 0 and 1 (exclusive)");
     }
     this.renewRatio = renewRatio;
   }
@@ -861,10 +861,12 @@ abstract class DistributedPrimitive {
     if (this.closed) {
       throw new LockError("not connected; nothing to release");
     }
-    // Capture the token before awaiting anything — a concurrent renew
-    // failure can set this.token to null, which would cause us to skip the
-    // server-side release and leave the lock held until lease expiry.
+    // Capture the token and socket before awaiting anything — a concurrent
+    // renew failure can set this.token/this.sock to null (via onLockLost →
+    // close()), which would cause us to skip the server-side release and
+    // leave the lock held until lease expiry.
     const tokenToRelease = this.token;
+    const sockToRelease = this.sock;
     try {
       this.stopRenew();
       // Wait for any in-flight renew to finish before sending the release
@@ -876,9 +878,9 @@ abstract class DistributedPrimitive {
         // doRelease below.
         this.stopRenew();
       }
-      if (this.sock && tokenToRelease) {
+      if (sockToRelease != null && tokenToRelease != null) {
         try {
-          await this.doRelease(this.sock, tokenToRelease);
+          await this.doRelease(sockToRelease, tokenToRelease);
         } catch {
           // Best-effort: connection may already be dead.
         }

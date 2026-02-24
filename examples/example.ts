@@ -15,7 +15,11 @@ async function demo(): Promise<void> {
     leaseTtlS: 20,
   });
 
-  await lock.acquire();
+  const ok = await lock.acquire();
+  if (!ok) {
+    console.error("failed to acquire lock (timeout)");
+    return;
+  }
   console.log(`acquired key=${lock.key} token=${lock.token} lease=${lock.lease}`);
 
   await sleep(500); // lock auto-renews in the background

@@ -174,6 +174,20 @@ describe("DistributedLock constructor", () => {
     );
   });
 
+  it("throws on NaN renewRatio", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "k", renewRatio: NaN }),
+      LockError,
+    );
+  });
+
+  it("throws on Infinity renewRatio", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "k", renewRatio: Infinity }),
+      LockError,
+    );
+  });
+
   it("accepts valid renewRatio", () => {
     const lock = new DistributedLock({ key: "k", renewRatio: 0.3 });
     assert.equal(lock.renewRatio, 0.3);

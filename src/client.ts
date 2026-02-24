@@ -100,6 +100,7 @@ function parseLease(value: string | undefined, fallback: number = 30): number {
  * enforces this).
  */
 const _readlineBuf = new WeakMap<net.Socket, string>();
+const MAX_LINE_LENGTH = 1024 * 1024; // 1 MB
 
 function readline(sock: net.Socket): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -122,6 +123,10 @@ function readline(sock: net.Socket): Promise<string> {
         const line = buf.slice(0, idx).replace(/\r$/, "");
         _readlineBuf.set(sock, buf.slice(idx + 1));
         resolve(line);
+      } else if (buf.length > MAX_LINE_LENGTH) {
+        cleanup();
+        _readlineBuf.delete(sock);
+        reject(new LockError("server response exceeded maximum line length"));
       }
     };
 

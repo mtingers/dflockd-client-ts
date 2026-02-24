@@ -44,6 +44,47 @@ describe("stableHashShard", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Key validation (no server needed)
+// ---------------------------------------------------------------------------
+
+describe("key validation", () => {
+  it("rejects empty key in DistributedLock constructor", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "" }),
+      LockError,
+    );
+  });
+
+  it("rejects key with newline in DistributedLock constructor", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "foo\nbar" }),
+      LockError,
+    );
+  });
+
+  it("rejects key with carriage return in DistributedLock constructor", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "foo\rbar" }),
+      LockError,
+    );
+  });
+
+  it("rejects empty key in DistributedSemaphore constructor", () => {
+    assert.throws(
+      () => new DistributedSemaphore({ key: "", limit: 3 }),
+      LockError,
+    );
+  });
+
+  it("rejects key with newline in DistributedSemaphore constructor", () => {
+    assert.throws(
+      () => new DistributedSemaphore({ key: "a\nb", limit: 3 }),
+      LockError,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // DistributedLock constructor validation
 // ---------------------------------------------------------------------------
 
@@ -141,6 +182,55 @@ describe("DistributedSemaphore auth option", () => {
   it("defaults auth to undefined when not provided", () => {
     const sem = new DistributedSemaphore({ key: "k", limit: 3 });
     assert.equal(sem.auth, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// connectTimeoutMs option (no server needed)
+// ---------------------------------------------------------------------------
+
+describe("DistributedLock connectTimeoutMs option", () => {
+  it("stores connectTimeoutMs on the instance", () => {
+    const lock = new DistributedLock({ key: "k", connectTimeoutMs: 5000 });
+    assert.equal(lock.connectTimeoutMs, 5000);
+  });
+
+  it("defaults connectTimeoutMs to undefined when not provided", () => {
+    const lock = new DistributedLock({ key: "k" });
+    assert.equal(lock.connectTimeoutMs, undefined);
+  });
+});
+
+describe("DistributedSemaphore connectTimeoutMs option", () => {
+  it("stores connectTimeoutMs on the instance", () => {
+    const sem = new DistributedSemaphore({ key: "k", limit: 3, connectTimeoutMs: 5000 });
+    assert.equal(sem.connectTimeoutMs, 5000);
+  });
+
+  it("defaults connectTimeoutMs to undefined when not provided", () => {
+    const sem = new DistributedSemaphore({ key: "k", limit: 3 });
+    assert.equal(sem.connectTimeoutMs, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// close() resets lease (no server needed)
+// ---------------------------------------------------------------------------
+
+describe("close() resets lease", () => {
+  it("resets lease to 0 on DistributedLock", () => {
+    const lock = new DistributedLock({ key: "k" });
+    // Simulate a lease value being set
+    lock.lease = 30;
+    lock.close();
+    assert.equal(lock.lease, 0);
+  });
+
+  it("resets lease to 0 on DistributedSemaphore", () => {
+    const sem = new DistributedSemaphore({ key: "k", limit: 3 });
+    sem.lease = 30;
+    sem.close();
+    assert.equal(sem.lease, 0);
   });
 });
 

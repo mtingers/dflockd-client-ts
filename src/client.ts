@@ -30,6 +30,21 @@ export class AuthError extends LockError {
 }
 
 // ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+function validateKey(key: string): void {
+  if (key === "") {
+    throw new LockError("key must not be empty");
+  }
+  if (/[\n\r]/.test(key)) {
+    throw new LockError(
+      "key must not contain newline or carriage return characters",
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Low-level helpers
 // ---------------------------------------------------------------------------
 
@@ -47,9 +62,23 @@ function writeAll(sock: net.Socket, data: Buffer): Promise<void> {
 }
 
 /**
+ * Parse a lease value from a server response part.
+ * Returns `fallback` when the value is missing, empty, or non-numeric.
+ */
+function parseLease(value: string | undefined, fallback: number = 30): number {
+  if (value == null || value === "") return fallback;
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
  * Read one newline-terminated line from the socket.
  * Resolves with the line (without trailing \r\n).
  * Rejects if the connection closes before a full line arrives.
+ *
+ * NOTE: Concurrent calls to readline() on the same socket are unsafe —
+ * callers must serialize reads (the request-response protocol naturally
+ * enforces this).
  */
 const _readlineBuf = new WeakMap<net.Socket, string>();
 
@@ -106,20 +135,39 @@ async function connect(
   port: number,
   tlsOptions?: tls.ConnectionOptions,
   auth?: string,
+  connectTimeoutMs?: number,
 ): Promise<net.Socket> {
   const sock = await new Promise<net.Socket>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const onConnect = () => {
+      if (timer) clearTimeout(timer);
+      s.removeListener("error", onError);
+      resolve(s);
+    };
+
+    const onError = (err: Error) => {
+      if (timer) clearTimeout(timer);
+      reject(err);
+    };
+
+    let s: net.Socket;
     if (tlsOptions) {
-      const s = tls.connect({ host, port, ...tlsOptions }, () => {
-        s.removeListener("error", reject);
-        resolve(s);
-      });
-      s.on("error", reject);
+      s = tls.connect({ host, port, ...tlsOptions }, onConnect);
     } else {
-      const s = net.createConnection({ host, port }, () => {
-        s.removeListener("error", reject);
-        resolve(s);
-      });
-      s.on("error", reject);
+      s = net.createConnection({ host, port }, onConnect);
+    }
+    s.on("error", onError);
+
+    if (connectTimeoutMs != null && connectTimeoutMs > 0) {
+      timer = setTimeout(() => {
+        s.destroy();
+        reject(
+          new LockError(
+            `connect timed out after ${connectTimeoutMs}ms to ${host}:${port}`,
+          ),
+        );
+      }, connectTimeoutMs);
     }
   });
 
@@ -174,7 +222,7 @@ function crc32(buf: Buffer): number {
 export type ShardingStrategy = (key: string, numServers: number) => number;
 
 export function stableHashShard(key: string, numServers: number): number {
-  return (crc32(Buffer.from(key, "utf-8")) >>> 0) % numServers;
+  return crc32(Buffer.from(key, "utf-8")) % numServers;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +271,7 @@ export async function acquire(
   acquireTimeoutS: number,
   leaseTtlS?: number,
 ): Promise<{ token: string; lease: number }> {
+  validateKey(key);
   const arg =
     leaseTtlS == null
       ? String(acquireTimeoutS)
@@ -240,7 +289,7 @@ export async function acquire(
 
   const parts = resp.split(" ");
   const token = parts[1];
-  const lease = parts.length >= 3 ? parseInt(parts[2], 10) : 30;
+  const lease = parseLease(parts[2]);
   return { token, lease };
 }
 
@@ -250,6 +299,7 @@ export async function renew(
   token: string,
   leaseTtlS?: number,
 ): Promise<number> {
+  validateKey(key);
   const arg = leaseTtlS == null ? token : `${token} ${leaseTtlS}`;
   await writeAll(sock, encodeLines("n", key, arg));
 
@@ -258,11 +308,12 @@ export async function renew(
     throw new LockError(`renew failed: '${resp}'`);
   }
 
-  const parts = resp.split(" ");
-  if (parts.length >= 2 && /^\d+$/.test(parts[1])) {
-    return parseInt(parts[1], 10);
+  // Bare "ok" — server confirmed renewal but didn't echo the lease.
+  if (resp === "ok") {
+    return leaseTtlS ?? 30;
   }
-  throw new LockError(`renew: malformed response: '${resp}'`);
+
+  return parseLease(resp.split(" ")[1]);
 }
 
 export async function enqueue(
@@ -270,6 +321,8 @@ export async function enqueue(
   key: string,
   leaseTtlS?: number,
 ): Promise<{ status: "acquired" | "queued"; token: string | null; lease: number | null }> {
+  validateKey(key);
+  // Lease TTL is optional for enqueue; empty arg means "use server default".
   const arg = leaseTtlS == null ? "" : String(leaseTtlS);
   await writeAll(sock, encodeLines("e", key, arg));
 
@@ -277,7 +330,7 @@ export async function enqueue(
   if (resp.startsWith("acquired ")) {
     const parts = resp.split(" ");
     const token = parts[1];
-    const lease = parts.length >= 3 ? parseInt(parts[2], 10) : 30;
+    const lease = parseLease(parts[2]);
     return { status: "acquired", token, lease };
   }
   if (resp === "queued") {
@@ -291,6 +344,7 @@ export async function waitForLock(
   key: string,
   waitTimeoutS: number,
 ): Promise<{ token: string; lease: number }> {
+  validateKey(key);
   await writeAll(sock, encodeLines("w", key, String(waitTimeoutS)));
 
   const resp = await readline(sock);
@@ -303,7 +357,7 @@ export async function waitForLock(
 
   const parts = resp.split(" ");
   const token = parts[1];
-  const lease = parts.length >= 3 ? parseInt(parts[2], 10) : 30;
+  const lease = parseLease(parts[2]);
   return { token, lease };
 }
 
@@ -312,6 +366,7 @@ export async function release(
   key: string,
   token: string,
 ): Promise<void> {
+  validateKey(key);
   await writeAll(sock, encodeLines("r", key, token));
 
   const resp = await readline(sock);
@@ -331,6 +386,7 @@ export async function semAcquire(
   limit: number,
   leaseTtlS?: number,
 ): Promise<{ token: string; lease: number }> {
+  validateKey(key);
   const arg =
     leaseTtlS == null
       ? `${acquireTimeoutS} ${limit}`
@@ -348,7 +404,7 @@ export async function semAcquire(
 
   const parts = resp.split(" ");
   const token = parts[1];
-  const lease = parts.length >= 3 ? parseInt(parts[2], 10) : 30;
+  const lease = parseLease(parts[2]);
   return { token, lease };
 }
 
@@ -358,6 +414,7 @@ export async function semRenew(
   token: string,
   leaseTtlS?: number,
 ): Promise<number> {
+  validateKey(key);
   const arg = leaseTtlS == null ? token : `${token} ${leaseTtlS}`;
   await writeAll(sock, encodeLines("sn", key, arg));
 
@@ -366,11 +423,12 @@ export async function semRenew(
     throw new LockError(`sem_renew failed: '${resp}'`);
   }
 
-  const parts = resp.split(" ");
-  if (parts.length >= 2 && /^\d+$/.test(parts[1])) {
-    return parseInt(parts[1], 10);
+  // Bare "ok" — server confirmed renewal but didn't echo the lease.
+  if (resp === "ok") {
+    return leaseTtlS ?? 30;
   }
-  throw new LockError(`sem_renew: malformed response: '${resp}'`);
+
+  return parseLease(resp.split(" ")[1]);
 }
 
 export async function semEnqueue(
@@ -379,6 +437,7 @@ export async function semEnqueue(
   limit: number,
   leaseTtlS?: number,
 ): Promise<{ status: "acquired" | "queued"; token: string | null; lease: number | null }> {
+  validateKey(key);
   const arg = leaseTtlS == null ? String(limit) : `${limit} ${leaseTtlS}`;
   await writeAll(sock, encodeLines("se", key, arg));
 
@@ -386,7 +445,7 @@ export async function semEnqueue(
   if (resp.startsWith("acquired ")) {
     const parts = resp.split(" ");
     const token = parts[1];
-    const lease = parts.length >= 3 ? parseInt(parts[2], 10) : 30;
+    const lease = parseLease(parts[2]);
     return { status: "acquired", token, lease };
   }
   if (resp === "queued") {
@@ -400,6 +459,7 @@ export async function semWaitForLock(
   key: string,
   waitTimeoutS: number,
 ): Promise<{ token: string; lease: number }> {
+  validateKey(key);
   await writeAll(sock, encodeLines("sw", key, String(waitTimeoutS)));
 
   const resp = await readline(sock);
@@ -412,7 +472,7 @@ export async function semWaitForLock(
 
   const parts = resp.split(" ");
   const token = parts[1];
-  const lease = parts.length >= 3 ? parseInt(parts[2], 10) : 30;
+  const lease = parseLease(parts[2]);
   return { token, lease };
 }
 
@@ -421,6 +481,7 @@ export async function semRelease(
   key: string,
   token: string,
 ): Promise<void> {
+  validateKey(key);
   await writeAll(sock, encodeLines("sr", key, token));
 
   const resp = await readline(sock);
@@ -461,11 +522,17 @@ async function statsProto(sock: net.Socket): Promise<Stats> {
  * ```
  */
 export async function stats(
-  options?: { host?: string; port?: number; tls?: tls.ConnectionOptions; auth?: string },
+  options?: {
+    host?: string;
+    port?: number;
+    tls?: tls.ConnectionOptions;
+    auth?: string;
+    connectTimeoutMs?: number;
+  },
 ): Promise<Stats> {
   const host = options?.host ?? DEFAULT_HOST;
   const port = options?.port ?? DEFAULT_PORT;
-  const sock = await connect(host, port, options?.tls, options?.auth);
+  const sock = await connect(host, port, options?.tls, options?.auth, options?.connectTimeoutMs);
   try {
     return await statsProto(sock);
   } finally {
@@ -474,10 +541,10 @@ export async function stats(
 }
 
 // ---------------------------------------------------------------------------
-// DistributedLock
+// Option interfaces
 // ---------------------------------------------------------------------------
 
-export interface DistributedLockOptions {
+interface BaseOptions {
   key: string;
   acquireTimeoutS?: number;
   leaseTtlS?: number;
@@ -491,9 +558,21 @@ export interface DistributedLockOptions {
   tls?: tls.ConnectionOptions;
   auth?: string;
   onLockLost?: (key: string, token: string) => void;
+  /** TCP connect timeout in milliseconds. Undefined means no timeout. */
+  connectTimeoutMs?: number;
 }
 
-export class DistributedLock {
+export interface DistributedLockOptions extends BaseOptions {}
+
+export interface DistributedSemaphoreOptions extends BaseOptions {
+  limit: number;
+}
+
+// ---------------------------------------------------------------------------
+// Shared base class
+// ---------------------------------------------------------------------------
+
+abstract class DistributedPrimitive {
   readonly key: string;
   readonly acquireTimeoutS: number;
   readonly leaseTtlS: number | undefined;
@@ -503,6 +582,7 @@ export class DistributedLock {
   readonly tls: tls.ConnectionOptions | undefined;
   readonly auth: string | undefined;
   readonly onLockLost: ((key: string, token: string) => void) | undefined;
+  readonly connectTimeoutMs: number | undefined;
 
   token: string | null = null;
   lease: number = 0;
@@ -511,13 +591,15 @@ export class DistributedLock {
   private renewTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
 
-  constructor(opts: DistributedLockOptions) {
+  constructor(opts: BaseOptions) {
+    validateKey(opts.key);
     this.key = opts.key;
     this.acquireTimeoutS = opts.acquireTimeoutS ?? 10;
     this.leaseTtlS = opts.leaseTtlS;
     this.tls = opts.tls;
     this.auth = opts.auth;
     this.onLockLost = opts.onLockLost;
+    this.connectTimeoutMs = opts.connectTimeoutMs;
 
     if (opts.servers) {
       if (opts.servers.length === 0) {
@@ -532,6 +614,37 @@ export class DistributedLock {
     this.renewRatio = opts.renewRatio ?? 0.5;
   }
 
+  // -- abstract protocol hooks (implemented by subclasses) --
+
+  protected abstract doAcquire(
+    sock: net.Socket,
+  ): Promise<{ token: string; lease: number }>;
+
+  protected abstract doEnqueue(
+    sock: net.Socket,
+  ): Promise<{
+    status: "acquired" | "queued";
+    token: string | null;
+    lease: number | null;
+  }>;
+
+  protected abstract doWait(
+    sock: net.Socket,
+    timeoutS: number,
+  ): Promise<{ token: string; lease: number }>;
+
+  protected abstract doRelease(
+    sock: net.Socket,
+    token: string,
+  ): Promise<void>;
+
+  protected abstract doRenew(
+    sock: net.Socket,
+    token: string,
+  ): Promise<number>;
+
+  // -- public API --
+
   private pickServer(): [string, number] {
     const idx = this.shardingStrategy(this.key, this.servers.length);
     if (!Number.isInteger(idx) || idx < 0 || idx >= this.servers.length) {
@@ -543,26 +656,25 @@ export class DistributedLock {
   }
 
   /**
-   * Acquire the lock. Returns `true` on success, `false` on timeout.
-   * @param opts.force - If `true`, silently close any existing connection before acquiring. Defaults to `false`, which throws if already connected.
+   * Acquire the lock / semaphore slot.
+   * Returns `true` on success, `false` on timeout.
+   * @param opts.force - If `true`, silently close any existing connection
+   *   before acquiring. Defaults to `false`, which throws if already connected.
    */
   async acquire(opts?: { force?: boolean }): Promise<boolean> {
     if (this.sock && !this.closed) {
       if (!opts?.force) {
-        throw new LockError("already connected; call release() or close() first, or pass { force: true }");
+        throw new LockError(
+          "already connected; call release() or close() first, or pass { force: true }",
+        );
       }
       this.close();
     }
     this.closed = false;
     const [host, port] = this.pickServer();
-    this.sock = await connect(host, port, this.tls, this.auth);
+    this.sock = await connect(host, port, this.tls, this.auth, this.connectTimeoutMs);
     try {
-      const result = await acquire(
-        this.sock,
-        this.key,
-        this.acquireTimeoutS,
-        this.leaseTtlS,
-      );
+      const result = await this.doAcquire(this.sock);
       this.token = result.token;
       this.lease = result.lease;
     } catch (err) {
@@ -574,12 +686,22 @@ export class DistributedLock {
     return true;
   }
 
-  /** Release the lock and close the connection. */
+  /**
+   * Release the lock / semaphore slot and close the connection.
+   *
+   * This is best-effort: if the underlying connection is already dead the
+   * protocol-level release error is silently ignored so that `release()` is
+   * safe to call in `finally` blocks.
+   */
   async release(): Promise<void> {
     try {
       this.stopRenew();
       if (this.sock && this.token) {
-        await release(this.sock, this.key, this.token);
+        try {
+          await this.doRelease(this.sock, this.token);
+        } catch {
+          // Best-effort: connection may already be dead.
+        }
       }
     } finally {
       this.close();
@@ -588,22 +710,25 @@ export class DistributedLock {
 
   /**
    * Two-phase step 1: connect and join the FIFO queue.
-   * Returns `"acquired"` (fast-path, lock is already held) or `"queued"`.
+   * Returns `"acquired"` (fast-path) or `"queued"`.
    * If acquired immediately, the renew loop starts automatically.
-   * @param opts.force - If `true`, silently close any existing connection before enqueuing. Defaults to `false`, which throws if already connected.
+   * @param opts.force - If `true`, silently close any existing connection
+   *   before enqueuing. Defaults to `false`, which throws if already connected.
    */
   async enqueue(opts?: { force?: boolean }): Promise<"acquired" | "queued"> {
     if (this.sock && !this.closed) {
       if (!opts?.force) {
-        throw new LockError("already connected; call release() or close() first, or pass { force: true }");
+        throw new LockError(
+          "already connected; call release() or close() first, or pass { force: true }",
+        );
       }
       this.close();
     }
     this.closed = false;
     const [host, port] = this.pickServer();
-    this.sock = await connect(host, port, this.tls, this.auth);
+    this.sock = await connect(host, port, this.tls, this.auth, this.connectTimeoutMs);
     try {
-      const result = await enqueue(this.sock, this.key, this.leaseTtlS);
+      const result = await this.doEnqueue(this.sock);
       if (result.status === "acquired") {
         this.token = result.token;
         this.lease = result.lease ?? 0;
@@ -617,7 +742,7 @@ export class DistributedLock {
   }
 
   /**
-   * Two-phase step 2: block until the lock is granted.
+   * Two-phase step 2: block until the lock / slot is granted.
    * Returns `true` if granted, `false` on timeout.
    * If already acquired during `enqueue()`, returns `true` immediately.
    */
@@ -631,7 +756,7 @@ export class DistributedLock {
     }
     const timeout = timeoutS ?? this.acquireTimeoutS;
     try {
-      const result = await waitForLock(this.sock, this.key, timeout);
+      const result = await this.doWait(this.sock, timeout);
       this.token = result.token;
       this.lease = result.lease;
     } catch (err) {
@@ -644,24 +769,30 @@ export class DistributedLock {
   }
 
   /**
-   * Run `fn` while holding the lock, then release automatically.
+   * Run `fn` while holding the lock / slot, then release automatically.
    *
-   * ```ts
-   * const lock = new DistributedLock({ key: "my-resource" });
-   * await lock.withLock(async () => {
-   *   // critical section
-   * });
-   * ```
+   * If `fn()` throws, its error is always preserved — a concurrent
+   * release failure will not mask it.
    */
   async withLock<T>(fn: () => T | Promise<T>): Promise<T> {
     const ok = await this.acquire();
     if (!ok) {
       throw new AcquireTimeoutError(this.key);
     }
+    let threw = false;
     try {
       return await fn();
+    } catch (err) {
+      threw = true;
+      throw err;
     } finally {
-      await this.release();
+      try {
+        await this.release();
+      } catch (releaseErr) {
+        // If fn() already threw, swallow the release error so it
+        // doesn't mask the original error.
+        if (!threw) throw releaseErr;
+      }
     }
   }
 
@@ -675,6 +806,7 @@ export class DistributedLock {
       this.sock = null;
     }
     this.token = null;
+    this.lease = 0;
   }
 
   // -- internals --
@@ -685,7 +817,7 @@ export class DistributedLock {
       if (!this.sock || !savedToken) return;
       const start = Date.now();
       try {
-        this.lease = await renew(this.sock, this.key, savedToken, this.leaseTtlS);
+        this.lease = await this.doRenew(this.sock, savedToken);
       } catch {
         // Only signal lock-lost if we still own this token (close() may have cleared it)
         if (this.token === savedToken) {
@@ -696,6 +828,9 @@ export class DistributedLock {
         }
         return;
       }
+      // Guard: if close() was called while the renew was in-flight, don't
+      // schedule another iteration (avoids clobbering a new acquire's timer).
+      if (this.closed || this.token !== savedToken) return;
       const elapsed = Date.now() - start;
       const interval = Math.max(1, this.lease * this.renewRatio) * 1000;
       this.renewTimer = setTimeout(loop, Math.max(0, interval - elapsed));
@@ -711,6 +846,36 @@ export class DistributedLock {
       clearTimeout(this.renewTimer);
       this.renewTimer = null;
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DistributedLock
+// ---------------------------------------------------------------------------
+
+export class DistributedLock extends DistributedPrimitive {
+  constructor(opts: DistributedLockOptions) {
+    super(opts);
+  }
+
+  protected doAcquire(sock: net.Socket) {
+    return acquire(sock, this.key, this.acquireTimeoutS, this.leaseTtlS);
+  }
+
+  protected doEnqueue(sock: net.Socket) {
+    return enqueue(sock, this.key, this.leaseTtlS);
+  }
+
+  protected doWait(sock: net.Socket, timeoutS: number) {
+    return waitForLock(sock, this.key, timeoutS);
+  }
+
+  protected doRelease(sock: net.Socket, token: string) {
+    return release(sock, this.key, token);
+  }
+
+  protected doRenew(sock: net.Socket, token: string) {
+    return renew(sock, this.key, token, this.leaseTtlS);
   }
 }
 
@@ -718,241 +883,37 @@ export class DistributedLock {
 // DistributedSemaphore
 // ---------------------------------------------------------------------------
 
-export interface DistributedSemaphoreOptions {
-  key: string;
-  limit: number;
-  acquireTimeoutS?: number;
-  leaseTtlS?: number;
-  /** @deprecated Use `servers` instead. */
-  host?: string;
-  /** @deprecated Use `servers` instead. */
-  port?: number;
-  servers?: Array<[host: string, port: number]>;
-  shardingStrategy?: ShardingStrategy;
-  renewRatio?: number;
-  tls?: tls.ConnectionOptions;
-  auth?: string;
-  onLockLost?: (key: string, token: string) => void;
-}
-
-export class DistributedSemaphore {
-  readonly key: string;
+export class DistributedSemaphore extends DistributedPrimitive {
   readonly limit: number;
-  readonly acquireTimeoutS: number;
-  readonly leaseTtlS: number | undefined;
-  readonly servers: Array<[string, number]>;
-  readonly shardingStrategy: ShardingStrategy;
-  readonly renewRatio: number;
-  readonly tls: tls.ConnectionOptions | undefined;
-  readonly auth: string | undefined;
-  readonly onLockLost: ((key: string, token: string) => void) | undefined;
-
-  token: string | null = null;
-  lease: number = 0;
-
-  private sock: net.Socket | null = null;
-  private renewTimer: ReturnType<typeof setTimeout> | null = null;
-  private closed = false;
 
   constructor(opts: DistributedSemaphoreOptions) {
-    this.key = opts.key;
+    super(opts);
     this.limit = opts.limit;
-    this.acquireTimeoutS = opts.acquireTimeoutS ?? 10;
-    this.leaseTtlS = opts.leaseTtlS;
-    this.tls = opts.tls;
-    this.auth = opts.auth;
-    this.onLockLost = opts.onLockLost;
-
-    if (opts.servers) {
-      if (opts.servers.length === 0) {
-        throw new LockError("servers list must not be empty");
-      }
-      this.servers = [...opts.servers];
-    } else {
-      this.servers = [[opts.host ?? DEFAULT_HOST, opts.port ?? DEFAULT_PORT]];
-    }
-
-    this.shardingStrategy = opts.shardingStrategy ?? stableHashShard;
-    this.renewRatio = opts.renewRatio ?? 0.5;
   }
 
-  private pickServer(): [string, number] {
-    const idx = this.shardingStrategy(this.key, this.servers.length);
-    if (!Number.isInteger(idx) || idx < 0 || idx >= this.servers.length) {
-      throw new LockError(
-        `shardingStrategy returned invalid index ${idx} for ${this.servers.length} server(s)`,
-      );
-    }
-    return this.servers[idx];
+  protected doAcquire(sock: net.Socket) {
+    return semAcquire(
+      sock,
+      this.key,
+      this.acquireTimeoutS,
+      this.limit,
+      this.leaseTtlS,
+    );
   }
 
-  /**
-   * Acquire a semaphore slot. Returns `true` on success, `false` on timeout.
-   * @param opts.force - If `true`, silently close any existing connection before acquiring. Defaults to `false`, which throws if already connected.
-   */
-  async acquire(opts?: { force?: boolean }): Promise<boolean> {
-    if (this.sock && !this.closed) {
-      if (!opts?.force) {
-        throw new LockError("already connected; call release() or close() first, or pass { force: true }");
-      }
-      this.close();
-    }
-    this.closed = false;
-    const [host, port] = this.pickServer();
-    this.sock = await connect(host, port, this.tls, this.auth);
-    try {
-      const result = await semAcquire(
-        this.sock,
-        this.key,
-        this.acquireTimeoutS,
-        this.limit,
-        this.leaseTtlS,
-      );
-      this.token = result.token;
-      this.lease = result.lease;
-    } catch (err) {
-      this.close();
-      if (err instanceof AcquireTimeoutError) return false;
-      throw err;
-    }
-    this.startRenew();
-    return true;
+  protected doEnqueue(sock: net.Socket) {
+    return semEnqueue(sock, this.key, this.limit, this.leaseTtlS);
   }
 
-  /** Release the semaphore slot and close the connection. */
-  async release(): Promise<void> {
-    try {
-      this.stopRenew();
-      if (this.sock && this.token) {
-        await semRelease(this.sock, this.key, this.token);
-      }
-    } finally {
-      this.close();
-    }
+  protected doWait(sock: net.Socket, timeoutS: number) {
+    return semWaitForLock(sock, this.key, timeoutS);
   }
 
-  /**
-   * Two-phase step 1: connect and join the FIFO queue.
-   * Returns `"acquired"` (fast-path, slot granted immediately) or `"queued"`.
-   * If acquired immediately, the renew loop starts automatically.
-   * @param opts.force - If `true`, silently close any existing connection before enqueuing. Defaults to `false`, which throws if already connected.
-   */
-  async enqueue(opts?: { force?: boolean }): Promise<"acquired" | "queued"> {
-    if (this.sock && !this.closed) {
-      if (!opts?.force) {
-        throw new LockError("already connected; call release() or close() first, or pass { force: true }");
-      }
-      this.close();
-    }
-    this.closed = false;
-    const [host, port] = this.pickServer();
-    this.sock = await connect(host, port, this.tls, this.auth);
-    try {
-      const result = await semEnqueue(this.sock, this.key, this.limit, this.leaseTtlS);
-      if (result.status === "acquired") {
-        this.token = result.token;
-        this.lease = result.lease ?? 0;
-        this.startRenew();
-      }
-      return result.status;
-    } catch (err) {
-      this.close();
-      throw err;
-    }
+  protected doRelease(sock: net.Socket, token: string) {
+    return semRelease(sock, this.key, token);
   }
 
-  /**
-   * Two-phase step 2: block until a semaphore slot is granted.
-   * Returns `true` if granted, `false` on timeout.
-   * If already acquired during `enqueue()`, returns `true` immediately.
-   */
-  async wait(timeoutS?: number): Promise<boolean> {
-    if (this.token !== null) {
-      return true;
-    }
-    if (!this.sock) {
-      throw new LockError("not connected; call enqueue() first");
-    }
-    const timeout = timeoutS ?? this.acquireTimeoutS;
-    try {
-      const result = await semWaitForLock(this.sock, this.key, timeout);
-      this.token = result.token;
-      this.lease = result.lease;
-    } catch (err) {
-      this.close();
-      if (err instanceof AcquireTimeoutError) return false;
-      throw err;
-    }
-    this.startRenew();
-    return true;
-  }
-
-  /**
-   * Run `fn` while holding a semaphore slot, then release automatically.
-   *
-   * ```ts
-   * const sem = new DistributedSemaphore({ key: "my-resource", limit: 5 });
-   * await sem.withLock(async () => {
-   *   // critical section (up to 5 concurrent holders)
-   * });
-   * ```
-   */
-  async withLock<T>(fn: () => T | Promise<T>): Promise<T> {
-    const ok = await this.acquire();
-    if (!ok) {
-      throw new AcquireTimeoutError(this.key);
-    }
-    try {
-      return await fn();
-    } finally {
-      await this.release();
-    }
-  }
-
-  /** Close the underlying socket (idempotent). */
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.stopRenew();
-    if (this.sock) {
-      this.sock.destroy();
-      this.sock = null;
-    }
-    this.token = null;
-  }
-
-  // -- internals --
-
-  private startRenew(): void {
-    const loop = async () => {
-      const savedToken = this.token;
-      if (!this.sock || !savedToken) return;
-      const start = Date.now();
-      try {
-        this.lease = await semRenew(this.sock, this.key, savedToken, this.leaseTtlS);
-      } catch {
-        if (this.token === savedToken) {
-          this.token = null;
-          if (this.onLockLost) {
-            this.onLockLost(this.key, savedToken);
-          }
-        }
-        return;
-      }
-      const elapsed = Date.now() - start;
-      const interval = Math.max(1, this.lease * this.renewRatio) * 1000;
-      this.renewTimer = setTimeout(loop, Math.max(0, interval - elapsed));
-      this.renewTimer.unref();
-    };
-    const interval = Math.max(1, this.lease * this.renewRatio) * 1000;
-    this.renewTimer = setTimeout(loop, interval);
-    this.renewTimer.unref();
-  }
-
-  private stopRenew(): void {
-    if (this.renewTimer != null) {
-      clearTimeout(this.renewTimer);
-      this.renewTimer = null;
-    }
+  protected doRenew(sock: net.Socket, token: string) {
+    return semRenew(sock, this.key, token, this.leaseTtlS);
   }
 }

@@ -312,6 +312,12 @@ export async function acquire(
   leaseTtlS?: number,
 ): Promise<{ token: string; lease: number }> {
   validateKey(key);
+  if (acquireTimeoutS < 0) {
+    throw new LockError("acquireTimeoutS must be >= 0");
+  }
+  if (leaseTtlS != null && leaseTtlS <= 0) {
+    throw new LockError("leaseTtlS must be > 0");
+  }
   const arg =
     leaseTtlS == null
       ? String(acquireTimeoutS)
@@ -344,6 +350,9 @@ export async function renew(
 ): Promise<number> {
   validateKey(key);
   validateToken(token);
+  if (leaseTtlS != null && leaseTtlS <= 0) {
+    throw new LockError("leaseTtlS must be > 0");
+  }
   const arg = leaseTtlS == null ? token : `${token} ${leaseTtlS}`;
   await writeAll(sock, encodeLines("n", key, arg));
 
@@ -366,6 +375,9 @@ export async function enqueue(
   leaseTtlS?: number,
 ): Promise<{ status: "acquired" | "queued"; token: string | null; lease: number | null }> {
   validateKey(key);
+  if (leaseTtlS != null && leaseTtlS <= 0) {
+    throw new LockError("leaseTtlS must be > 0");
+  }
   // Lease TTL is optional for enqueue; empty arg means "use server default".
   const arg = leaseTtlS == null ? "" : String(leaseTtlS);
   await writeAll(sock, encodeLines("e", key, arg));
@@ -392,6 +404,9 @@ export async function waitForLock(
   waitTimeoutS: number,
 ): Promise<{ token: string; lease: number }> {
   validateKey(key);
+  if (waitTimeoutS < 0) {
+    throw new LockError("waitTimeoutS must be >= 0");
+  }
   await writeAll(sock, encodeLines("w", key, String(waitTimeoutS)));
 
   const resp = await readline(sock);
@@ -438,6 +453,15 @@ export async function semAcquire(
   leaseTtlS?: number,
 ): Promise<{ token: string; lease: number }> {
   validateKey(key);
+  if (acquireTimeoutS < 0) {
+    throw new LockError("acquireTimeoutS must be >= 0");
+  }
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new LockError("limit must be an integer >= 1");
+  }
+  if (leaseTtlS != null && leaseTtlS <= 0) {
+    throw new LockError("leaseTtlS must be > 0");
+  }
   const arg =
     leaseTtlS == null
       ? `${acquireTimeoutS} ${limit}`
@@ -470,6 +494,9 @@ export async function semRenew(
 ): Promise<number> {
   validateKey(key);
   validateToken(token);
+  if (leaseTtlS != null && leaseTtlS <= 0) {
+    throw new LockError("leaseTtlS must be > 0");
+  }
   const arg = leaseTtlS == null ? token : `${token} ${leaseTtlS}`;
   await writeAll(sock, encodeLines("sn", key, arg));
 
@@ -493,6 +520,12 @@ export async function semEnqueue(
   leaseTtlS?: number,
 ): Promise<{ status: "acquired" | "queued"; token: string | null; lease: number | null }> {
   validateKey(key);
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new LockError("limit must be an integer >= 1");
+  }
+  if (leaseTtlS != null && leaseTtlS <= 0) {
+    throw new LockError("leaseTtlS must be > 0");
+  }
   const arg = leaseTtlS == null ? String(limit) : `${limit} ${leaseTtlS}`;
   await writeAll(sock, encodeLines("se", key, arg));
 
@@ -518,6 +551,9 @@ export async function semWaitForLock(
   waitTimeoutS: number,
 ): Promise<{ token: string; lease: number }> {
   validateKey(key);
+  if (waitTimeoutS < 0) {
+    throw new LockError("waitTimeoutS must be >= 0");
+  }
   await writeAll(sock, encodeLines("sw", key, String(waitTimeoutS)));
 
   const resp = await readline(sock);
@@ -809,6 +845,9 @@ abstract class DistributedPrimitive {
    * safe to call in `finally` blocks.
    */
   async release(): Promise<void> {
+    if (this.closed) {
+      throw new LockError("not connected; nothing to release");
+    }
     // Capture the token before awaiting anything — a concurrent renew
     // failure can set this.token to null, which would cause us to skip the
     // server-side release and leave the lock held until lease expiry.

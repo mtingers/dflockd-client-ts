@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import * as assert from "node:assert/strict";
+import * as net from "node:net";
 import {
   DistributedLock,
   DistributedSemaphore,
@@ -8,7 +9,53 @@ import {
   LockError,
   stableHashShard,
   stats,
+  acquire,
+  renew,
+  release,
+  enqueue,
+  waitForLock,
+  semAcquire,
+  semRenew,
+  semRelease,
+  semEnqueue,
+  semWaitForLock,
 } from "./client.js";
+
+// ---------------------------------------------------------------------------
+// Mock server helper — creates a TCP server that speaks the dflockd protocol
+// ---------------------------------------------------------------------------
+
+function createMockServer(
+  handler: (lines: string[], respond: (msg: string) => void) => void,
+): Promise<{ server: net.Server; port: number }> {
+  return new Promise((resolve) => {
+    const server = net.createServer((conn) => {
+      let buf = "";
+      const lines: string[] = [];
+      conn.on("data", (chunk) => {
+        buf += chunk.toString("utf-8");
+        let idx: number;
+        while ((idx = buf.indexOf("\n")) !== -1) {
+          lines.push(buf.slice(0, idx).replace(/\r$/, ""));
+          buf = buf.slice(idx + 1);
+          // Protocol: commands are 3-line sequences (command, key, arg)
+          if (lines.length >= 3) {
+            const batch = lines.splice(0, 3);
+            handler(batch, (msg) => conn.write(msg + "\n"));
+          }
+        }
+      });
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address() as net.AddressInfo;
+      resolve({ server, port: addr.port });
+    });
+  });
+}
+
+function closeMockServer(server: net.Server): Promise<void> {
+  return new Promise((resolve) => server.close(() => resolve()));
+}
 
 // ---------------------------------------------------------------------------
 // stableHashShard (pure, no server needed)
@@ -458,6 +505,1086 @@ describe("DistributedSemaphore pickServer bounds checking", () => {
       shardingStrategy: () => 1,
     });
     await assert.rejects(() => sem.acquire(), LockError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Protocol function input validation (mock socket, no server needed)
+// ---------------------------------------------------------------------------
+
+describe("acquire() input validation", () => {
+  const fakeSock = new net.Socket();
+
+  it("rejects empty key", async () => {
+    await assert.rejects(() => acquire(fakeSock, "", 10), LockError);
+  });
+
+  it("rejects key with NUL byte", async () => {
+    await assert.rejects(() => acquire(fakeSock, "a\0b", 10), LockError);
+  });
+
+  it("rejects key with newline", async () => {
+    await assert.rejects(() => acquire(fakeSock, "a\nb", 10), LockError);
+  });
+
+  it("rejects key with carriage return", async () => {
+    await assert.rejects(() => acquire(fakeSock, "a\rb", 10), LockError);
+  });
+
+  it("rejects negative acquireTimeoutS", async () => {
+    await assert.rejects(() => acquire(fakeSock, "k", -1), LockError);
+  });
+
+  it("rejects NaN acquireTimeoutS", async () => {
+    await assert.rejects(() => acquire(fakeSock, "k", NaN), LockError);
+  });
+
+  it("rejects Infinity acquireTimeoutS", async () => {
+    await assert.rejects(() => acquire(fakeSock, "k", Infinity), LockError);
+  });
+
+  it("rejects leaseTtlS = 0", async () => {
+    await assert.rejects(() => acquire(fakeSock, "k", 10, 0), LockError);
+  });
+
+  it("rejects negative leaseTtlS", async () => {
+    await assert.rejects(() => acquire(fakeSock, "k", 10, -5), LockError);
+  });
+
+  it("rejects NaN leaseTtlS", async () => {
+    await assert.rejects(() => acquire(fakeSock, "k", 10, NaN), LockError);
+  });
+
+  it("rejects Infinity leaseTtlS", async () => {
+    await assert.rejects(() => acquire(fakeSock, "k", 10, Infinity), LockError);
+  });
+});
+
+describe("renew() input validation", () => {
+  const fakeSock = new net.Socket();
+
+  it("rejects empty key", async () => {
+    await assert.rejects(() => renew(fakeSock, "", "tok"), LockError);
+  });
+
+  it("rejects key with NUL byte", async () => {
+    await assert.rejects(() => renew(fakeSock, "a\0b", "tok"), LockError);
+  });
+
+  it("rejects empty token", async () => {
+    await assert.rejects(() => renew(fakeSock, "k", ""), LockError);
+  });
+
+  it("rejects token with NUL byte", async () => {
+    await assert.rejects(() => renew(fakeSock, "k", "t\0k"), LockError);
+  });
+
+  it("rejects token with newline", async () => {
+    await assert.rejects(() => renew(fakeSock, "k", "t\nk"), LockError);
+  });
+
+  it("rejects leaseTtlS = 0", async () => {
+    await assert.rejects(() => renew(fakeSock, "k", "tok", 0), LockError);
+  });
+
+  it("rejects negative leaseTtlS", async () => {
+    await assert.rejects(() => renew(fakeSock, "k", "tok", -1), LockError);
+  });
+
+  it("rejects NaN leaseTtlS", async () => {
+    await assert.rejects(() => renew(fakeSock, "k", "tok", NaN), LockError);
+  });
+});
+
+describe("release() input validation", () => {
+  const fakeSock = new net.Socket();
+
+  it("rejects empty key", async () => {
+    await assert.rejects(() => release(fakeSock, "", "tok"), LockError);
+  });
+
+  it("rejects key with NUL byte", async () => {
+    await assert.rejects(() => release(fakeSock, "a\0b", "tok"), LockError);
+  });
+
+  it("rejects empty token", async () => {
+    await assert.rejects(() => release(fakeSock, "k", ""), LockError);
+  });
+
+  it("rejects token with NUL byte", async () => {
+    await assert.rejects(() => release(fakeSock, "k", "t\0k"), LockError);
+  });
+});
+
+describe("enqueue() input validation", () => {
+  const fakeSock = new net.Socket();
+
+  it("rejects empty key", async () => {
+    await assert.rejects(() => enqueue(fakeSock, "", 10), LockError);
+  });
+
+  it("rejects key with NUL byte", async () => {
+    await assert.rejects(() => enqueue(fakeSock, "a\0b", 10), LockError);
+  });
+
+  it("rejects leaseTtlS = 0", async () => {
+    await assert.rejects(() => enqueue(fakeSock, "k", 0), LockError);
+  });
+
+  it("rejects negative leaseTtlS", async () => {
+    await assert.rejects(() => enqueue(fakeSock, "k", -1), LockError);
+  });
+});
+
+describe("waitForLock() input validation", () => {
+  const fakeSock = new net.Socket();
+
+  it("rejects empty key", async () => {
+    await assert.rejects(() => waitForLock(fakeSock, "", 10), LockError);
+  });
+
+  it("rejects key with NUL byte", async () => {
+    await assert.rejects(() => waitForLock(fakeSock, "a\0b", 10), LockError);
+  });
+
+  it("rejects negative waitTimeoutS", async () => {
+    await assert.rejects(() => waitForLock(fakeSock, "k", -1), LockError);
+  });
+
+  it("rejects NaN waitTimeoutS", async () => {
+    await assert.rejects(() => waitForLock(fakeSock, "k", NaN), LockError);
+  });
+
+  it("rejects Infinity waitTimeoutS", async () => {
+    await assert.rejects(() => waitForLock(fakeSock, "k", Infinity), LockError);
+  });
+});
+
+describe("semAcquire() input validation", () => {
+  const fakeSock = new net.Socket();
+
+  it("rejects empty key", async () => {
+    await assert.rejects(() => semAcquire(fakeSock, "", 10, 3), LockError);
+  });
+
+  it("rejects key with NUL byte", async () => {
+    await assert.rejects(() => semAcquire(fakeSock, "a\0b", 10, 3), LockError);
+  });
+
+  it("rejects negative acquireTimeoutS", async () => {
+    await assert.rejects(() => semAcquire(fakeSock, "k", -1, 3), LockError);
+  });
+
+  it("rejects non-integer limit", async () => {
+    await assert.rejects(() => semAcquire(fakeSock, "k", 10, 1.5), LockError);
+  });
+
+  it("rejects limit = 0", async () => {
+    await assert.rejects(() => semAcquire(fakeSock, "k", 10, 0), LockError);
+  });
+
+  it("rejects negative limit", async () => {
+    await assert.rejects(() => semAcquire(fakeSock, "k", 10, -1), LockError);
+  });
+
+  it("rejects leaseTtlS = 0", async () => {
+    await assert.rejects(() => semAcquire(fakeSock, "k", 10, 3, 0), LockError);
+  });
+
+  it("rejects NaN leaseTtlS", async () => {
+    await assert.rejects(() => semAcquire(fakeSock, "k", 10, 3, NaN), LockError);
+  });
+});
+
+describe("semRenew() input validation", () => {
+  const fakeSock = new net.Socket();
+
+  it("rejects empty key", async () => {
+    await assert.rejects(() => semRenew(fakeSock, "", "tok"), LockError);
+  });
+
+  it("rejects empty token", async () => {
+    await assert.rejects(() => semRenew(fakeSock, "k", ""), LockError);
+  });
+
+  it("rejects token with NUL byte", async () => {
+    await assert.rejects(() => semRenew(fakeSock, "k", "t\0k"), LockError);
+  });
+
+  it("rejects leaseTtlS = 0", async () => {
+    await assert.rejects(() => semRenew(fakeSock, "k", "tok", 0), LockError);
+  });
+});
+
+describe("semRelease() input validation", () => {
+  const fakeSock = new net.Socket();
+
+  it("rejects empty key", async () => {
+    await assert.rejects(() => semRelease(fakeSock, "", "tok"), LockError);
+  });
+
+  it("rejects empty token", async () => {
+    await assert.rejects(() => semRelease(fakeSock, "k", ""), LockError);
+  });
+
+  it("rejects token with carriage return", async () => {
+    await assert.rejects(() => semRelease(fakeSock, "k", "t\rk"), LockError);
+  });
+});
+
+describe("semEnqueue() input validation", () => {
+  const fakeSock = new net.Socket();
+
+  it("rejects empty key", async () => {
+    await assert.rejects(() => semEnqueue(fakeSock, "", 3), LockError);
+  });
+
+  it("rejects non-integer limit", async () => {
+    await assert.rejects(() => semEnqueue(fakeSock, "k", 1.5), LockError);
+  });
+
+  it("rejects limit = 0", async () => {
+    await assert.rejects(() => semEnqueue(fakeSock, "k", 0), LockError);
+  });
+
+  it("rejects leaseTtlS = 0", async () => {
+    await assert.rejects(() => semEnqueue(fakeSock, "k", 3, 0), LockError);
+  });
+});
+
+describe("semWaitForLock() input validation", () => {
+  const fakeSock = new net.Socket();
+
+  it("rejects empty key", async () => {
+    await assert.rejects(() => semWaitForLock(fakeSock, "", 10), LockError);
+  });
+
+  it("rejects negative waitTimeoutS", async () => {
+    await assert.rejects(() => semWaitForLock(fakeSock, "k", -1), LockError);
+  });
+
+  it("rejects NaN waitTimeoutS", async () => {
+    await assert.rejects(() => semWaitForLock(fakeSock, "k", NaN), LockError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Protocol functions with mock server (response parsing, edge cases)
+// ---------------------------------------------------------------------------
+
+describe("acquire() response parsing (mock server)", () => {
+  it("parses ok response with token and lease", async () => {
+    const { server, port } = await createMockServer((lines, respond) => {
+      assert.equal(lines[0], "l");
+      respond("ok abc123 30");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await acquire(sock, "mykey", 10);
+      assert.equal(result.token, "abc123");
+      assert.equal(result.lease, 30);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("defaults lease to 30 when server omits it", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok abc123");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await acquire(sock, "mykey", 10);
+      assert.equal(result.token, "abc123");
+      assert.equal(result.lease, 30);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("falls back to 30 for non-numeric lease", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok abc123 notanumber");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await acquire(sock, "mykey", 10);
+      assert.equal(result.lease, 30);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("falls back to 30 for negative lease", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok abc123 -5");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await acquire(sock, "mykey", 10);
+      assert.equal(result.lease, 30);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("accepts lease = 0", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok abc123 0");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await acquire(sock, "mykey", 10);
+      assert.equal(result.lease, 0);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("throws AcquireTimeoutError on timeout response", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("timeout");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await assert.rejects(
+        () => acquire(sock, "mykey", 10),
+        AcquireTimeoutError,
+      );
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("throws LockError on unknown response", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("error_something");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await assert.rejects(
+        () => acquire(sock, "mykey", 10),
+        LockError,
+      );
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("sends correct protocol lines with leaseTtlS", async () => {
+    const sentLines: string[][] = [];
+    const { server, port } = await createMockServer((lines, respond) => {
+      sentLines.push([...lines]);
+      respond("ok tok1 15");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await acquire(sock, "mykey", 10, 20);
+      assert.equal(sentLines[0][0], "l");
+      assert.equal(sentLines[0][1], "mykey");
+      assert.equal(sentLines[0][2], "10 20");
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("sends correct protocol lines without leaseTtlS", async () => {
+    const sentLines: string[][] = [];
+    const { server, port } = await createMockServer((lines, respond) => {
+      sentLines.push([...lines]);
+      respond("ok tok1 30");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await acquire(sock, "mykey", 10);
+      assert.equal(sentLines[0][2], "10");
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+describe("renew() response parsing (mock server)", () => {
+  it("parses ok response with lease", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok 45");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const lease = await renew(sock, "mykey", "tok1");
+      assert.equal(lease, 45);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("returns leaseTtlS on bare ok response", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const lease = await renew(sock, "mykey", "tok1", 20);
+      assert.equal(lease, 20);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("returns default 30 on bare ok response without leaseTtlS", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const lease = await renew(sock, "mykey", "tok1");
+      assert.equal(lease, 30);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("falls back to 30 for non-numeric lease in ok response", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok garbage");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const lease = await renew(sock, "mykey", "tok1");
+      assert.equal(lease, 30);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("throws LockError on error response", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("error_expired");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await assert.rejects(() => renew(sock, "mykey", "tok1"), LockError);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+describe("release() response parsing (mock server)", () => {
+  it("resolves on ok", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await release(sock, "mykey", "tok1"); // should not throw
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("throws LockError on error response", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("error_not_owner");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await assert.rejects(() => release(sock, "mykey", "tok1"), LockError);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+describe("enqueue() response parsing (mock server)", () => {
+  it("parses acquired response with token and lease", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("acquired tok1 25");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await enqueue(sock, "mykey");
+      assert.equal(result.status, "acquired");
+      assert.equal(result.token, "tok1");
+      assert.equal(result.lease, 25);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("parses queued response", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("queued");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await enqueue(sock, "mykey");
+      assert.equal(result.status, "queued");
+      assert.equal(result.token, null);
+      assert.equal(result.lease, null);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("throws LockError on unknown response", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("error_something");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await assert.rejects(() => enqueue(sock, "mykey"), LockError);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+describe("waitForLock() response parsing (mock server)", () => {
+  it("parses ok response with token and lease", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok tok1 15");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await waitForLock(sock, "mykey", 10);
+      assert.equal(result.token, "tok1");
+      assert.equal(result.lease, 15);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("throws AcquireTimeoutError on timeout", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("timeout");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await assert.rejects(
+        () => waitForLock(sock, "mykey", 10),
+        AcquireTimeoutError,
+      );
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Semaphore protocol functions with mock server
+// ---------------------------------------------------------------------------
+
+describe("semAcquire() response parsing (mock server)", () => {
+  it("parses ok response with token and lease", async () => {
+    const { server, port } = await createMockServer((lines, respond) => {
+      assert.equal(lines[0], "sl");
+      respond("ok semtok 20");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await semAcquire(sock, "mykey", 10, 3);
+      assert.equal(result.token, "semtok");
+      assert.equal(result.lease, 20);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("sends correct args with leaseTtlS", async () => {
+    const sentLines: string[][] = [];
+    const { server, port } = await createMockServer((lines, respond) => {
+      sentLines.push([...lines]);
+      respond("ok semtok 20");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await semAcquire(sock, "mykey", 10, 3, 15);
+      assert.equal(sentLines[0][2], "10 3 15");
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("throws AcquireTimeoutError on timeout", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("timeout");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await assert.rejects(
+        () => semAcquire(sock, "mykey", 10, 3),
+        AcquireTimeoutError,
+      );
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+describe("semRenew() response parsing (mock server)", () => {
+  it("parses ok response with lease", async () => {
+    const { server, port } = await createMockServer((lines, respond) => {
+      assert.equal(lines[0], "sn");
+      respond("ok 50");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const lease = await semRenew(sock, "mykey", "tok1");
+      assert.equal(lease, 50);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("returns default on bare ok", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const lease = await semRenew(sock, "mykey", "tok1");
+      assert.equal(lease, 30);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+describe("semEnqueue() response parsing (mock server)", () => {
+  it("parses acquired response", async () => {
+    const { server, port } = await createMockServer((lines, respond) => {
+      assert.equal(lines[0], "se");
+      respond("acquired stok 10");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await semEnqueue(sock, "mykey", 3);
+      assert.equal(result.status, "acquired");
+      assert.equal(result.token, "stok");
+      assert.equal(result.lease, 10);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("parses queued response", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("queued");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await semEnqueue(sock, "mykey", 3);
+      assert.equal(result.status, "queued");
+      assert.equal(result.token, null);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+describe("semWaitForLock() response parsing (mock server)", () => {
+  it("parses ok response", async () => {
+    const { server, port } = await createMockServer((lines, respond) => {
+      assert.equal(lines[0], "sw");
+      respond("ok stok2 12");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await semWaitForLock(sock, "mykey", 10);
+      assert.equal(result.token, "stok2");
+      assert.equal(result.lease, 12);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("throws AcquireTimeoutError on timeout", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("timeout");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await assert.rejects(
+        () => semWaitForLock(sock, "mykey", 10),
+        AcquireTimeoutError,
+      );
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+describe("semRelease() response parsing (mock server)", () => {
+  it("resolves on ok", async () => {
+    const { server, port } = await createMockServer((lines, respond) => {
+      assert.equal(lines[0], "sr");
+      respond("ok");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await semRelease(sock, "mykey", "tok1");
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("throws LockError on error response", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("error_not_owner");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await assert.rejects(() => semRelease(sock, "mykey", "tok1"), LockError);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DistributedLock / DistributedSemaphore with mock server
+// ---------------------------------------------------------------------------
+
+describe("DistributedLock with mock server", () => {
+  it("release() throws after close()", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok tok1 30");
+    });
+    try {
+      const lock = new DistributedLock({ key: "k", host: "127.0.0.1", port });
+      await lock.acquire();
+      lock.close();
+      await assert.rejects(() => lock.release(), LockError);
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("release() throws after double release", async () => {
+    let callCount = 0;
+    const { server: s2, port: p2 } = await createMockServer((_lines, respond) => {
+      callCount++;
+      if (callCount === 1) {
+        respond("ok tok1 30"); // acquire
+      } else {
+        respond("ok"); // release
+      }
+    });
+    try {
+      const lock = new DistributedLock({ key: "k", host: "127.0.0.1", port: p2 });
+      await lock.acquire();
+      await lock.release();
+      // Second release should throw because close() was called
+      await assert.rejects(() => lock.release(), LockError);
+    } finally {
+      await closeMockServer(s2);
+    }
+  });
+
+  it("wait() throws after close()", async () => {
+    const lock = new DistributedLock({ key: "k" });
+    lock.close();
+    await assert.rejects(() => lock.wait(), LockError);
+  });
+
+  it("close() is idempotent", () => {
+    const lock = new DistributedLock({ key: "k" });
+    lock.close();
+    lock.close(); // should not throw
+    lock.close(); // should not throw
+  });
+
+  it("close() resets token and lease", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("ok tok1 30");
+    });
+    try {
+      const lock = new DistributedLock({ key: "k", host: "127.0.0.1", port });
+      await lock.acquire();
+      assert.ok(lock.token !== null);
+      assert.ok(lock.lease > 0);
+      lock.close();
+      assert.equal(lock.token, null);
+      assert.equal(lock.lease, 0);
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("withLock preserves fn error over release error", async () => {
+    let callCount = 0;
+    const { server, port } = await createMockServer((_lines, respond) => {
+      callCount++;
+      if (callCount === 1) {
+        // acquire succeeds
+        respond("ok tok1 30");
+      } else {
+        // release fails
+        respond("error_something");
+      }
+    });
+    try {
+      const lock = new DistributedLock({ key: "k", host: "127.0.0.1", port });
+      await assert.rejects(
+        () =>
+          lock.withLock(async () => {
+            throw new Error("original error");
+          }),
+        // The original error from fn() should be preserved, not masked by the
+        // release failure.
+        { message: "original error" },
+      );
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("connectTimeoutMs causes timeout on unresponsive host", async () => {
+    // Connect to a non-routable address to trigger connect timeout.
+    // 192.0.2.1 is TEST-NET-1 (RFC 5737), should be unroutable.
+    const lock = new DistributedLock({
+      key: "k",
+      host: "192.0.2.1",
+      port: 6388,
+      connectTimeoutMs: 200,
+    });
+    const start = Date.now();
+    await assert.rejects(() => lock.acquire(), LockError);
+    const elapsed = Date.now() - start;
+    // Should have timed out around 200ms, give generous margin
+    assert.ok(elapsed < 5000, `expected fast timeout, got ${elapsed}ms`);
+  });
+});
+
+describe("DistributedSemaphore with mock server", () => {
+  it("acquire and release round-trip", async () => {
+    let callCount = 0;
+    const { server, port } = await createMockServer((_lines, respond) => {
+      callCount++;
+      if (callCount === 1) {
+        respond("ok semtok 20");
+      } else {
+        respond("ok");
+      }
+    });
+    try {
+      const sem = new DistributedSemaphore({ key: "k", limit: 3, host: "127.0.0.1", port });
+      const ok = await sem.acquire();
+      assert.equal(ok, true);
+      assert.equal(sem.token, "semtok");
+      assert.equal(sem.lease, 20);
+      await sem.release();
+      assert.equal(sem.token, null);
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("acquire returns false on timeout", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("timeout");
+    });
+    try {
+      const sem = new DistributedSemaphore({ key: "k", limit: 3, host: "127.0.0.1", port });
+      const ok = await sem.acquire();
+      assert.equal(ok, false);
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Constructor validation for NaN/Infinity edge cases
+// ---------------------------------------------------------------------------
+
+describe("constructor NaN/Infinity edge cases", () => {
+  it("rejects NaN acquireTimeoutS", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "k", acquireTimeoutS: NaN }),
+      LockError,
+    );
+  });
+
+  it("rejects Infinity acquireTimeoutS", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "k", acquireTimeoutS: Infinity }),
+      LockError,
+    );
+  });
+
+  it("rejects NaN leaseTtlS", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "k", leaseTtlS: NaN }),
+      LockError,
+    );
+  });
+
+  it("rejects Infinity leaseTtlS", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "k", leaseTtlS: Infinity }),
+      LockError,
+    );
+  });
+
+  it("rejects -Infinity renewRatio", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "k", renewRatio: -Infinity }),
+      LockError,
+    );
+  });
+
+  it("semaphore rejects NaN acquireTimeoutS", () => {
+    assert.throws(
+      () => new DistributedSemaphore({ key: "k", limit: 3, acquireTimeoutS: NaN }),
+      LockError,
+    );
+  });
+
+  it("semaphore rejects NaN leaseTtlS", () => {
+    assert.throws(
+      () => new DistributedSemaphore({ key: "k", limit: 3, leaseTtlS: NaN }),
+      LockError,
+    );
+  });
+
+  it("semaphore rejects NaN renewRatio", () => {
+    assert.throws(
+      () => new DistributedSemaphore({ key: "k", limit: 3, renewRatio: NaN }),
+      LockError,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Key validation: NUL byte in constructor
+// ---------------------------------------------------------------------------
+
+describe("key validation: NUL byte", () => {
+  it("rejects key with NUL in DistributedLock constructor", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "a\0b" }),
+      LockError,
+    );
+  });
+
+  it("rejects key with NUL in DistributedSemaphore constructor", () => {
+    assert.throws(
+      () => new DistributedSemaphore({ key: "a\0b", limit: 3 }),
+      LockError,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readline: server closes connection before full line
+// ---------------------------------------------------------------------------
+
+describe("readline edge cases (mock server)", () => {
+  it("rejects when server closes connection before sending a line", async () => {
+    const server = net.createServer((conn) => {
+      // Write partial data without newline, then close
+      conn.write("partial");
+      conn.end();
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as net.AddressInfo).port;
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await assert.rejects(
+        () => acquire(sock, "mykey", 10),
+        LockError,
+      );
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("handles \\r\\n line endings", async () => {
+    const server = net.createServer((conn) => {
+      conn.on("data", () => {
+        conn.write("ok tok1 30\r\n");
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as net.AddressInfo).port;
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      const result = await acquire(sock, "mykey", 10);
+      assert.equal(result.token, "tok1");
+      assert.equal(result.lease, 30);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
   });
 });
 

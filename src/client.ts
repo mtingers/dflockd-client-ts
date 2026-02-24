@@ -76,7 +76,7 @@ function writeAll(sock: net.Socket, data: Buffer): Promise<void> {
 function parseLease(value: string | undefined, fallback: number = 30): number {
   if (value == null || value === "") return fallback;
   const n = parseInt(value, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 /**
@@ -126,15 +126,23 @@ function readline(sock: net.Socket): Promise<string> {
       reject(new LockError("server closed connection"));
     };
 
+    const onEnd = () => {
+      cleanup();
+      _readlineBuf.delete(sock);
+      reject(new LockError("server closed connection"));
+    };
+
     const cleanup = () => {
       sock.removeListener("data", onData);
       sock.removeListener("error", onError);
       sock.removeListener("close", onClose);
+      sock.removeListener("end", onEnd);
     };
 
     sock.on("data", onData);
     sock.on("error", onError);
     sock.on("close", onClose);
+    sock.on("end", onEnd);
   });
 }
 
@@ -156,12 +164,13 @@ async function connect(
 
     const onError = (err: Error) => {
       if (timer) clearTimeout(timer);
+      s.destroy();
       reject(err);
     };
 
     let s: net.Socket;
     if (tlsOptions) {
-      s = tls.connect({ host, port, ...tlsOptions }, onConnect);
+      s = tls.connect({ ...tlsOptions, host, port }, onConnect);
     } else {
       s = net.createConnection({ host, port }, onConnect);
     }
@@ -302,6 +311,9 @@ export async function acquire(
 
   const parts = resp.split(" ");
   const token = parts[1];
+  if (!token) {
+    throw new LockError(`acquire: server returned no token: '${resp}'`);
+  }
   const lease = parseLease(parts[2]);
   return { token, lease };
 }
@@ -343,6 +355,9 @@ export async function enqueue(
   if (resp.startsWith("acquired ")) {
     const parts = resp.split(" ");
     const token = parts[1];
+    if (!token) {
+      throw new LockError(`enqueue: server returned no token: '${resp}'`);
+    }
     const lease = parseLease(parts[2]);
     return { status: "acquired", token, lease };
   }
@@ -370,6 +385,9 @@ export async function waitForLock(
 
   const parts = resp.split(" ");
   const token = parts[1];
+  if (!token) {
+    throw new LockError(`wait: server returned no token: '${resp}'`);
+  }
   const lease = parseLease(parts[2]);
   return { token, lease };
 }
@@ -417,6 +435,9 @@ export async function semAcquire(
 
   const parts = resp.split(" ");
   const token = parts[1];
+  if (!token) {
+    throw new LockError(`sem_acquire: server returned no token: '${resp}'`);
+  }
   const lease = parseLease(parts[2]);
   return { token, lease };
 }
@@ -458,6 +479,9 @@ export async function semEnqueue(
   if (resp.startsWith("acquired ")) {
     const parts = resp.split(" ");
     const token = parts[1];
+    if (!token) {
+      throw new LockError(`sem_enqueue: server returned no token: '${resp}'`);
+    }
     const lease = parseLease(parts[2]);
     return { status: "acquired", token, lease };
   }
@@ -485,6 +509,9 @@ export async function semWaitForLock(
 
   const parts = resp.split(" ");
   const token = parts[1];
+  if (!token) {
+    throw new LockError(`sem_wait: server returned no token: '${resp}'`);
+  }
   const lease = parseLease(parts[2]);
   return { token, lease };
 }

@@ -680,7 +680,7 @@ describe("integration: sharding routes to correct server", () => {
     });
 
     await assert.rejects(() => lock.acquire());
-    await lock.close();
+    lock.close();
   });
 });
 

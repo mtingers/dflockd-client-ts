@@ -277,7 +277,7 @@ export async function enqueue(
   if (resp.startsWith("acquired ")) {
     const parts = resp.split(" ");
     const token = parts[1];
-    const lease = parts.length >= 3 ? parseInt(parts[2], 10) : 33;
+    const lease = parts.length >= 3 ? parseInt(parts[2], 10) : 30;
     return { status: "acquired", token, lease };
   }
   if (resp === "queued") {
@@ -303,7 +303,7 @@ export async function waitForLock(
 
   const parts = resp.split(" ");
   const token = parts[1];
-  const lease = parts.length >= 3 ? parseInt(parts[2], 10) : 33;
+  const lease = parts.length >= 3 ? parseInt(parts[2], 10) : 30;
   return { token, lease };
 }
 
@@ -442,7 +442,11 @@ async function statsProto(sock: net.Socket): Promise<Stats> {
   }
 
   const json = resp.slice(3);
-  return JSON.parse(json) as Stats;
+  try {
+    return JSON.parse(json) as Stats;
+  } catch {
+    throw new LockError(`stats: malformed JSON response: '${json}'`);
+  }
 }
 
 /**

@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.8.2
+
+### Bug fixes
+
+- `renew`/`semRenew` response check tightened to reject responses like `"okay"` that incorrectly matched `startsWith("ok")`
+- `startRenew` loop now uses the lease value returned by the server on each renewal, recalculates the interval, and subtracts round-trip elapsed time
+- `startRenew` saves the token before the async renew call, preventing a race where `close()` clears the token mid-flight
+- `stats()` now wraps `JSON.parse` and throws `LockError` on malformed JSON responses
+- Fix inconsistent default lease fallback: `enqueue`/`waitForLock` used `33` instead of `30`
+- All `sock.write()` calls now await the write callback via `writeAll()`, properly handling TCP backpressure
+- `readline` cleans up its internal buffer on socket error/close
+- `close()` is now synchronous (was unnecessarily `async`)
+- Enable `setNoDelay` on sockets for lower latency
+- Defensive copy of `servers` array in constructors
+
 ## 1.8.0
 
 ### Features

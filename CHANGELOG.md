@@ -13,7 +13,7 @@
 - `connect` removes the temporary `error` listener after a successful connection, preventing listener leaks
 - Add a no-op `error` listener on sockets after connect to prevent unhandled `error` event crashes
 - `renew` and `semRenew` throw `LockError` on malformed server responses instead of silently returning `-1`
-- `acquire()` and `enqueue()` now close any existing connection first, preventing socket leaks when reusing a `DistributedLock` or `DistributedSemaphore` instance
+- `acquire()` and `enqueue()` now throw `LockError` if called while already connected (programmer error); pass `{ force: true }` to silently close the previous connection instead
 - `auth` option no longer sends an auth command for empty strings
 - `shardingStrategy` return value is now validated; out-of-bounds or non-integer values throw `LockError`
 

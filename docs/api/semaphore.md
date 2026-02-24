@@ -44,9 +44,11 @@ await sem.withLock(async () => {
 });
 ```
 
-### `acquire(): Promise<boolean>`
+### `acquire(opts?: { force?: boolean }): Promise<boolean>`
 
 Acquire a semaphore slot. Returns `true` on success, `false` on timeout.
+
+Throws `LockError` if the instance is already connected (call `release()` or `close()` first). Pass `{ force: true }` to silently close the existing connection before acquiring.
 
 ```ts
 const ok = await sem.acquire();
@@ -60,9 +62,11 @@ Release the semaphore slot and close the connection.
 await sem.release();
 ```
 
-### `enqueue(): Promise<"acquired" | "queued">`
+### `enqueue(opts?: { force?: boolean }): Promise<"acquired" | "queued">`
 
 Two-phase step 1: connect and join the FIFO queue. Returns `"acquired"` if a slot was immediately available or `"queued"` if all slots are taken.
+
+Throws `LockError` if already connected. Pass `{ force: true }` to close first.
 
 ### `wait(timeoutS?: number): Promise<boolean>`
 

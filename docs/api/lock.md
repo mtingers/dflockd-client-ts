@@ -45,9 +45,11 @@ await lock.withLock(async () => {
 
 Throws `AcquireTimeoutError` if the lock cannot be acquired within `acquireTimeoutS`.
 
-### `acquire(): Promise<boolean>`
+### `acquire(opts?: { force?: boolean }): Promise<boolean>`
 
 Acquire the lock. Returns `true` on success, `false` on timeout.
+
+Throws `LockError` if the instance is already connected (call `release()` or `close()` first). Pass `{ force: true }` to silently close the existing connection before acquiring.
 
 ```ts
 const ok = await lock.acquire();
@@ -64,9 +66,11 @@ Release the lock and close the connection. Stops background lease renewal.
 await lock.release();
 ```
 
-### `enqueue(): Promise<"acquired" | "queued">`
+### `enqueue(opts?: { force?: boolean }): Promise<"acquired" | "queued">`
 
 Two-phase step 1: connect and join the FIFO queue. Returns `"acquired"` if the lock was free (fast path) or `"queued"` if contended.
+
+Throws `LockError` if already connected. Pass `{ force: true }` to close first.
 
 If acquired immediately, the background renew loop starts automatically.
 

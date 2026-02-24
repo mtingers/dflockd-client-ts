@@ -530,9 +530,17 @@ export class DistributedLock {
     return this.servers[idx];
   }
 
-  /** Acquire the lock. Returns `true` on success, `false` on timeout. */
-  async acquire(): Promise<boolean> {
-    await this.close();
+  /**
+   * Acquire the lock. Returns `true` on success, `false` on timeout.
+   * @param opts.force - If `true`, silently close any existing connection before acquiring. Defaults to `false`, which throws if already connected.
+   */
+  async acquire(opts?: { force?: boolean }): Promise<boolean> {
+    if (this.sock && !this.closed) {
+      if (!opts?.force) {
+        throw new LockError("already connected; call release() or close() first, or pass { force: true }");
+      }
+      await this.close();
+    }
     this.closed = false;
     const [host, port] = this.pickServer();
     this.sock = await connect(host, port, this.tls, this.auth);
@@ -570,9 +578,15 @@ export class DistributedLock {
    * Two-phase step 1: connect and join the FIFO queue.
    * Returns `"acquired"` (fast-path, lock is already held) or `"queued"`.
    * If acquired immediately, the renew loop starts automatically.
+   * @param opts.force - If `true`, silently close any existing connection before enqueuing. Defaults to `false`, which throws if already connected.
    */
-  async enqueue(): Promise<"acquired" | "queued"> {
-    await this.close();
+  async enqueue(opts?: { force?: boolean }): Promise<"acquired" | "queued"> {
+    if (this.sock && !this.closed) {
+      if (!opts?.force) {
+        throw new LockError("already connected; call release() or close() first, or pass { force: true }");
+      }
+      await this.close();
+    }
     this.closed = false;
     const [host, port] = this.pickServer();
     this.sock = await connect(host, port, this.tls, this.auth);
@@ -752,9 +766,17 @@ export class DistributedSemaphore {
     return this.servers[idx];
   }
 
-  /** Acquire a semaphore slot. Returns `true` on success, `false` on timeout. */
-  async acquire(): Promise<boolean> {
-    await this.close();
+  /**
+   * Acquire a semaphore slot. Returns `true` on success, `false` on timeout.
+   * @param opts.force - If `true`, silently close any existing connection before acquiring. Defaults to `false`, which throws if already connected.
+   */
+  async acquire(opts?: { force?: boolean }): Promise<boolean> {
+    if (this.sock && !this.closed) {
+      if (!opts?.force) {
+        throw new LockError("already connected; call release() or close() first, or pass { force: true }");
+      }
+      await this.close();
+    }
     this.closed = false;
     const [host, port] = this.pickServer();
     this.sock = await connect(host, port, this.tls, this.auth);
@@ -793,9 +815,15 @@ export class DistributedSemaphore {
    * Two-phase step 1: connect and join the FIFO queue.
    * Returns `"acquired"` (fast-path, slot granted immediately) or `"queued"`.
    * If acquired immediately, the renew loop starts automatically.
+   * @param opts.force - If `true`, silently close any existing connection before enqueuing. Defaults to `false`, which throws if already connected.
    */
-  async enqueue(): Promise<"acquired" | "queued"> {
-    await this.close();
+  async enqueue(opts?: { force?: boolean }): Promise<"acquired" | "queued"> {
+    if (this.sock && !this.closed) {
+      if (!opts?.force) {
+        throw new LockError("already connected; call release() or close() first, or pass { force: true }");
+      }
+      await this.close();
+    }
     this.closed = false;
     const [host, port] = this.pickServer();
     this.sock = await connect(host, port, this.tls, this.auth);

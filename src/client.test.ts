@@ -689,20 +689,20 @@ describe("integration: sharding routes to correct server", () => {
 // ---------------------------------------------------------------------------
 
 describe("integration: lock reuse (issue #7)", () => {
-  it("can acquire() twice on the same DistributedLock instance", async () => {
+  it("can acquire() twice on the same DistributedLock after release", async () => {
     const lock = new DistributedLock({ key: "test-reuse-lock" });
 
     const ok1 = await lock.acquire();
     assert.equal(ok1, true);
     await lock.release();
 
-    // Second acquire on same instance should work without leaking the socket
+    // Second acquire after release should work fine (no force needed)
     const ok2 = await lock.acquire();
     assert.equal(ok2, true);
     await lock.release();
   });
 
-  it("can acquire() twice on the same DistributedSemaphore instance", async () => {
+  it("can acquire() twice on the same DistributedSemaphore after release", async () => {
     const sem = new DistributedSemaphore({ key: "test-reuse-sem", limit: 3 });
 
     const ok1 = await sem.acquire();
@@ -714,17 +714,57 @@ describe("integration: lock reuse (issue #7)", () => {
     await sem.release();
   });
 
-  it("acquire() cleans up previous connection when called without release", async () => {
-    const lock = new DistributedLock({ key: "test-reuse-no-release", leaseTtlS: 2 });
+  it("throws when acquire() called while already connected", async () => {
+    const lock = new DistributedLock({ key: "test-reuse-throw", leaseTtlS: 2 });
+
+    const ok = await lock.acquire();
+    assert.equal(ok, true);
+
+    await assert.rejects(() => lock.acquire(), LockError);
+    await lock.release();
+  });
+
+  it("throws when enqueue() called while already connected", async () => {
+    const lock = new DistributedLock({ key: "test-reuse-enq-throw", leaseTtlS: 2 });
+
+    await lock.enqueue();
+
+    await assert.rejects(() => lock.enqueue(), LockError);
+    await lock.release();
+  });
+
+  it("acquire({ force: true }) closes previous connection", async () => {
+    const lock = new DistributedLock({ key: "test-reuse-force", leaseTtlS: 2 });
 
     const ok1 = await lock.acquire();
     assert.equal(ok1, true);
     const token1 = lock.token;
 
-    // Call acquire again without releasing — should not leak the old socket
-    const ok2 = await lock.acquire();
+    // Force acquire without releasing
+    const ok2 = await lock.acquire({ force: true });
     assert.equal(ok2, true);
     assert.ok(lock.token !== token1, "should get a new token");
     await lock.release();
+  });
+
+  it("semaphore throws when acquire() called while already connected", async () => {
+    const sem = new DistributedSemaphore({ key: "test-sem-reuse-throw", limit: 3 });
+
+    const ok = await sem.acquire();
+    assert.equal(ok, true);
+
+    await assert.rejects(() => sem.acquire(), LockError);
+    await sem.release();
+  });
+
+  it("semaphore acquire({ force: true }) closes previous connection", async () => {
+    const sem = new DistributedSemaphore({ key: "test-sem-reuse-force", limit: 3 });
+
+    const ok1 = await sem.acquire();
+    assert.equal(ok1, true);
+
+    const ok2 = await sem.acquire({ force: true });
+    assert.equal(ok2, true);
+    await sem.release();
   });
 });

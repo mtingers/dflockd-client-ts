@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.3
+
+### Improvements
+
+- Renewal timers now call `.unref()` so they don't keep the Node.js event loop alive if a user forgets to call `release()`/`close()`
+
 ## 1.8.2
 
 ### Bug fixes

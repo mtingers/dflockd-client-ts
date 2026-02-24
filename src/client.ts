@@ -699,9 +699,11 @@ export class DistributedLock {
       const elapsed = Date.now() - start;
       const interval = Math.max(1, this.lease * this.renewRatio) * 1000;
       this.renewTimer = setTimeout(loop, Math.max(0, interval - elapsed));
+      this.renewTimer.unref();
     };
     const interval = Math.max(1, this.lease * this.renewRatio) * 1000;
     this.renewTimer = setTimeout(loop, interval);
+    this.renewTimer.unref();
   }
 
   private stopRenew(): void {
@@ -940,9 +942,11 @@ export class DistributedSemaphore {
       const elapsed = Date.now() - start;
       const interval = Math.max(1, this.lease * this.renewRatio) * 1000;
       this.renewTimer = setTimeout(loop, Math.max(0, interval - elapsed));
+      this.renewTimer.unref();
     };
     const interval = Math.max(1, this.lease * this.renewRatio) * 1000;
     this.renewTimer = setTimeout(loop, interval);
+    this.renewTimer.unref();
   }
 
   private stopRenew(): void {

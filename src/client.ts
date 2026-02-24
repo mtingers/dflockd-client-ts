@@ -44,6 +44,14 @@ function validateKey(key: string): void {
   }
 }
 
+function validateAuth(auth: string): void {
+  if (/[\n\r]/.test(auth)) {
+    throw new LockError(
+      "auth token must not contain newline or carriage return characters",
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Low-level helpers
 // ---------------------------------------------------------------------------
@@ -68,7 +76,7 @@ function writeAll(sock: net.Socket, data: Buffer): Promise<void> {
 function parseLease(value: string | undefined, fallback: number = 30): number {
   if (value == null || value === "") return fallback;
   const n = parseInt(value, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 /**
@@ -161,6 +169,7 @@ async function connect(
 
     if (connectTimeoutMs != null && connectTimeoutMs > 0) {
       timer = setTimeout(() => {
+        s.removeListener("error", onError);
         s.destroy();
         reject(
           new LockError(
@@ -179,6 +188,7 @@ async function connect(
   sock.on("error", () => {});
 
   if (auth != null && auth !== "") {
+    validateAuth(auth);
     await writeAll(sock, encodeLines("auth", "_", auth));
     const resp = await readline(sock);
     if (resp === "ok") {
@@ -222,6 +232,9 @@ function crc32(buf: Buffer): number {
 export type ShardingStrategy = (key: string, numServers: number) => number;
 
 export function stableHashShard(key: string, numServers: number): number {
+  if (numServers <= 0) {
+    throw new LockError("numServers must be greater than 0");
+  }
   return crc32(Buffer.from(key, "utf-8")) % numServers;
 }
 
@@ -560,6 +573,12 @@ interface BaseOptions {
   onLockLost?: (key: string, token: string) => void;
   /** TCP connect timeout in milliseconds. Undefined means no timeout. */
   connectTimeoutMs?: number;
+  /**
+   * Socket idle timeout in milliseconds. If no data is received within this
+   * period, the socket emits a 'timeout' event and is destroyed, causing any
+   * pending `readline` to reject. Undefined means no timeout.
+   */
+  socketTimeoutMs?: number;
 }
 
 export interface DistributedLockOptions extends BaseOptions {}
@@ -583,12 +602,14 @@ abstract class DistributedPrimitive {
   readonly auth: string | undefined;
   readonly onLockLost: ((key: string, token: string) => void) | undefined;
   readonly connectTimeoutMs: number | undefined;
+  readonly socketTimeoutMs: number | undefined;
 
   token: string | null = null;
   lease: number = 0;
 
   private sock: net.Socket | null = null;
   private renewTimer: ReturnType<typeof setTimeout> | null = null;
+  private renewInFlight: Promise<void> | null = null;
   private closed = false;
 
   constructor(opts: BaseOptions) {
@@ -600,6 +621,14 @@ abstract class DistributedPrimitive {
     this.auth = opts.auth;
     this.onLockLost = opts.onLockLost;
     this.connectTimeoutMs = opts.connectTimeoutMs;
+    this.socketTimeoutMs = opts.socketTimeoutMs;
+
+    if (this.acquireTimeoutS < 0) {
+      throw new LockError("acquireTimeoutS must be >= 0");
+    }
+    if (this.leaseTtlS != null && this.leaseTtlS <= 0) {
+      throw new LockError("leaseTtlS must be > 0");
+    }
 
     if (opts.servers) {
       if (opts.servers.length === 0) {
@@ -611,7 +640,12 @@ abstract class DistributedPrimitive {
     }
 
     this.shardingStrategy = opts.shardingStrategy ?? stableHashShard;
-    this.renewRatio = opts.renewRatio ?? 0.5;
+
+    const renewRatio = opts.renewRatio ?? 0.5;
+    if (renewRatio <= 0 || renewRatio >= 1) {
+      throw new LockError("renewRatio must be between 0 and 1 (exclusive)");
+    }
+    this.renewRatio = renewRatio;
   }
 
   // -- abstract protocol hooks (implemented by subclasses) --
@@ -645,6 +679,27 @@ abstract class DistributedPrimitive {
 
   // -- public API --
 
+  private async openConnection(): Promise<net.Socket> {
+    const [host, port] = this.pickServer();
+    const sock = await connect(host, port, this.tls, this.auth, this.connectTimeoutMs);
+    this.applySocketTimeout(sock);
+    return sock;
+  }
+
+  /**
+   * Apply (or re-apply) the socket idle timeout.  Passing 0 disables it.
+   */
+  private applySocketTimeout(sock: net.Socket, overrideMs?: number): void {
+    const ms = overrideMs ?? this.socketTimeoutMs;
+    if (ms != null && ms > 0) {
+      sock.setTimeout(ms, () => {
+        sock.destroy(new LockError("socket idle timeout"));
+      });
+    } else {
+      sock.setTimeout(0);
+    }
+  }
+
   private pickServer(): [string, number] {
     const idx = this.shardingStrategy(this.key, this.servers.length);
     if (!Number.isInteger(idx) || idx < 0 || idx >= this.servers.length) {
@@ -671,10 +726,13 @@ abstract class DistributedPrimitive {
       this.close();
     }
     this.closed = false;
-    const [host, port] = this.pickServer();
-    this.sock = await connect(host, port, this.tls, this.auth, this.connectTimeoutMs);
+    this.sock = await this.openConnection();
     try {
+      // Suspend socket idle timeout during the blocking acquire — the server
+      // won't send data until the lock is granted or the acquire times out.
+      this.applySocketTimeout(this.sock, 0);
       const result = await this.doAcquire(this.sock);
+      this.applySocketTimeout(this.sock);
       this.token = result.token;
       this.lease = result.lease;
     } catch (err) {
@@ -696,6 +754,11 @@ abstract class DistributedPrimitive {
   async release(): Promise<void> {
     try {
       this.stopRenew();
+      // Wait for any in-flight renew to finish before sending the release
+      // command — concurrent reads/writes on the same socket are unsafe.
+      if (this.renewInFlight) {
+        await this.renewInFlight;
+      }
       if (this.sock && this.token) {
         try {
           await this.doRelease(this.sock, this.token);
@@ -725,8 +788,7 @@ abstract class DistributedPrimitive {
       this.close();
     }
     this.closed = false;
-    const [host, port] = this.pickServer();
-    this.sock = await connect(host, port, this.tls, this.auth, this.connectTimeoutMs);
+    this.sock = await this.openConnection();
     try {
       const result = await this.doEnqueue(this.sock);
       if (result.status === "acquired") {
@@ -756,7 +818,11 @@ abstract class DistributedPrimitive {
     }
     const timeout = timeoutS ?? this.acquireTimeoutS;
     try {
+      // Suspend socket idle timeout during the blocking wait — the server
+      // won't send data until the lock/slot is granted or the wait times out.
+      this.applySocketTimeout(this.sock, 0);
       const result = await this.doWait(this.sock, timeout);
+      this.applySocketTimeout(this.sock);
       this.token = result.token;
       this.lease = result.lease;
     } catch (err) {
@@ -801,6 +867,7 @@ abstract class DistributedPrimitive {
     if (this.closed) return;
     this.closed = true;
     this.stopRenew();
+    this.renewInFlight = null;
     if (this.sock) {
       this.sock.destroy();
       this.sock = null;
@@ -812,22 +879,38 @@ abstract class DistributedPrimitive {
   // -- internals --
 
   private startRenew(): void {
+    this.stopRenew();
     const loop = async () => {
       const savedToken = this.token;
       if (!this.sock || !savedToken) return;
       const start = Date.now();
-      try {
-        this.lease = await this.doRenew(this.sock, savedToken);
-      } catch {
-        // Only signal lock-lost if we still own this token (close() may have cleared it)
-        if (this.token === savedToken) {
-          this.token = null;
-          if (this.onLockLost) {
-            this.onLockLost(this.key, savedToken);
+      const p = (async () => {
+        try {
+          this.lease = await this.doRenew(this.sock!, savedToken);
+        } catch {
+          // Only signal lock-lost if we still own this token (close() may have cleared it)
+          if (this.token === savedToken) {
+            this.token = null;
+            if (this.onLockLost) {
+              try {
+                // Cast to unknown: the declared return type is void, but an
+                // async callback will return a Promise at runtime.
+                const result: unknown = this.onLockLost(this.key, savedToken);
+                // Guard against async callbacks returning a rejected Promise.
+                if (result instanceof Promise) {
+                  result.catch(() => {});
+                }
+              } catch {
+                // Never let a user callback crash the process.
+              }
+            }
           }
+          return;
         }
-        return;
-      }
+      })();
+      this.renewInFlight = p;
+      await p;
+      this.renewInFlight = null;
       // Guard: if close() was called while the renew was in-flight, don't
       // schedule another iteration (avoids clobbering a new acquire's timer).
       if (this.closed || this.token !== savedToken) return;
@@ -888,6 +971,9 @@ export class DistributedSemaphore extends DistributedPrimitive {
 
   constructor(opts: DistributedSemaphoreOptions) {
     super(opts);
+    if (!Number.isInteger(opts.limit) || opts.limit < 1) {
+      throw new LockError("limit must be an integer >= 1");
+    }
     this.limit = opts.limit;
   }
 

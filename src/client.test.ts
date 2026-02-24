@@ -41,6 +41,14 @@ describe("stableHashShard", () => {
   it("returns 0 for a single server", () => {
     assert.equal(stableHashShard("anything", 1), 0);
   });
+
+  it("throws when numServers is 0", () => {
+    assert.throws(() => stableHashShard("key", 0), LockError);
+  });
+
+  it("throws when numServers is negative", () => {
+    assert.throws(() => stableHashShard("key", -1), LockError);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -124,6 +132,99 @@ describe("DistributedLock constructor", () => {
     const custom = (_key: string, _n: number) => 0;
     const lock = new DistributedLock({ key: "k", shardingStrategy: custom });
     assert.equal(lock.shardingStrategy, custom);
+  });
+
+  it("throws on negative acquireTimeoutS", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "k", acquireTimeoutS: -1 }),
+      LockError,
+    );
+  });
+
+  it("throws on leaseTtlS <= 0", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "k", leaseTtlS: 0 }),
+      LockError,
+    );
+    assert.throws(
+      () => new DistributedLock({ key: "k", leaseTtlS: -5 }),
+      LockError,
+    );
+  });
+
+  it("throws on renewRatio <= 0", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "k", renewRatio: 0 }),
+      LockError,
+    );
+    assert.throws(
+      () => new DistributedLock({ key: "k", renewRatio: -0.5 }),
+      LockError,
+    );
+  });
+
+  it("throws on renewRatio >= 1", () => {
+    assert.throws(
+      () => new DistributedLock({ key: "k", renewRatio: 1 }),
+      LockError,
+    );
+    assert.throws(
+      () => new DistributedLock({ key: "k", renewRatio: 2 }),
+      LockError,
+    );
+  });
+
+  it("accepts valid renewRatio", () => {
+    const lock = new DistributedLock({ key: "k", renewRatio: 0.3 });
+    assert.equal(lock.renewRatio, 0.3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DistributedSemaphore limit validation (no server needed)
+// ---------------------------------------------------------------------------
+
+describe("DistributedSemaphore limit validation", () => {
+  it("throws on limit 0", () => {
+    assert.throws(
+      () => new DistributedSemaphore({ key: "k", limit: 0 }),
+      LockError,
+    );
+  });
+
+  it("throws on negative limit", () => {
+    assert.throws(
+      () => new DistributedSemaphore({ key: "k", limit: -1 }),
+      LockError,
+    );
+  });
+
+  it("throws on non-integer limit", () => {
+    assert.throws(
+      () => new DistributedSemaphore({ key: "k", limit: 1.5 }),
+      LockError,
+    );
+  });
+
+  it("accepts valid limit", () => {
+    const sem = new DistributedSemaphore({ key: "k", limit: 1 });
+    assert.equal(sem.limit, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// socketTimeoutMs option (no server needed)
+// ---------------------------------------------------------------------------
+
+describe("DistributedLock socketTimeoutMs option", () => {
+  it("stores socketTimeoutMs on the instance", () => {
+    const lock = new DistributedLock({ key: "k", socketTimeoutMs: 30000 });
+    assert.equal(lock.socketTimeoutMs, 30000);
+  });
+
+  it("defaults socketTimeoutMs to undefined when not provided", () => {
+    const lock = new DistributedLock({ key: "k" });
+    assert.equal(lock.socketTimeoutMs, undefined);
   });
 });
 

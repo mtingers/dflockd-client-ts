@@ -682,21 +682,29 @@ abstract class DistributedPrimitive {
   private async openConnection(): Promise<net.Socket> {
     const [host, port] = this.pickServer();
     const sock = await connect(host, port, this.tls, this.auth, this.connectTimeoutMs);
-    this.applySocketTimeout(sock);
+    if (this.socketTimeoutMs != null && this.socketTimeoutMs > 0) {
+      // Register the listener once; use setTimeout(ms)/setTimeout(0) to
+      // toggle without accumulating duplicate listeners.
+      sock.on("timeout", () => {
+        sock.destroy(new LockError("socket idle timeout"));
+      });
+      sock.setTimeout(this.socketTimeoutMs);
+    }
     return sock;
   }
 
   /**
-   * Apply (or re-apply) the socket idle timeout.  Passing 0 disables it.
+   * Suspend or restore the socket idle timeout.  Only has effect when
+   * `socketTimeoutMs` was set at construction time and a listener was
+   * registered in `openConnection`.
    */
-  private applySocketTimeout(sock: net.Socket, overrideMs?: number): void {
-    const ms = overrideMs ?? this.socketTimeoutMs;
-    if (ms != null && ms > 0) {
-      sock.setTimeout(ms, () => {
-        sock.destroy(new LockError("socket idle timeout"));
-      });
-    } else {
-      sock.setTimeout(0);
+  private suspendSocketTimeout(sock: net.Socket): void {
+    sock.setTimeout(0);
+  }
+
+  private restoreSocketTimeout(sock: net.Socket): void {
+    if (this.socketTimeoutMs != null && this.socketTimeoutMs > 0) {
+      sock.setTimeout(this.socketTimeoutMs);
     }
   }
 
@@ -730,9 +738,9 @@ abstract class DistributedPrimitive {
     try {
       // Suspend socket idle timeout during the blocking acquire — the server
       // won't send data until the lock is granted or the acquire times out.
-      this.applySocketTimeout(this.sock, 0);
+      this.suspendSocketTimeout(this.sock);
       const result = await this.doAcquire(this.sock);
-      this.applySocketTimeout(this.sock);
+      this.restoreSocketTimeout(this.sock);
       this.token = result.token;
       this.lease = result.lease;
     } catch (err) {
@@ -758,6 +766,10 @@ abstract class DistributedPrimitive {
       // command — concurrent reads/writes on the same socket are unsafe.
       if (this.renewInFlight) {
         await this.renewInFlight;
+        // The loop resumes before us (it registered its .then first) and may
+        // have scheduled a new timer.  Clear it so it cannot fire during
+        // doRelease below.
+        this.stopRenew();
       }
       if (this.sock && this.token) {
         try {
@@ -820,9 +832,9 @@ abstract class DistributedPrimitive {
     try {
       // Suspend socket idle timeout during the blocking wait — the server
       // won't send data until the lock/slot is granted or the wait times out.
-      this.applySocketTimeout(this.sock, 0);
+      this.suspendSocketTimeout(this.sock);
       const result = await this.doWait(this.sock, timeout);
-      this.applySocketTimeout(this.sock);
+      this.restoreSocketTimeout(this.sock);
       this.token = result.token;
       this.lease = result.lease;
     } catch (err) {

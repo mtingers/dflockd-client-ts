@@ -52,6 +52,17 @@ function validateAuth(auth: string): void {
   }
 }
 
+function validateToken(token: string): void {
+  if (token === "") {
+    throw new LockError("token must not be empty");
+  }
+  if (/[\n\r]/.test(token)) {
+    throw new LockError(
+      "token must not contain newline or carriage return characters",
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Low-level helpers
 // ---------------------------------------------------------------------------
@@ -76,7 +87,7 @@ function writeAll(sock: net.Socket, data: Buffer): Promise<void> {
 function parseLease(value: string | undefined, fallback: number = 30): number {
   if (value == null || value === "") return fallback;
   const n = parseInt(value, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 /**
@@ -155,14 +166,19 @@ async function connect(
 ): Promise<net.Socket> {
   const sock = await new Promise<net.Socket>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let settled = false;
 
     const onConnect = () => {
+      if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
       s.removeListener("error", onError);
       resolve(s);
     };
 
     const onError = (err: Error) => {
+      if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
       s.destroy();
       reject(err);
@@ -178,6 +194,8 @@ async function connect(
 
     if (connectTimeoutMs != null && connectTimeoutMs > 0) {
       timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         s.removeListener("error", onError);
         s.destroy();
         reject(
@@ -325,6 +343,7 @@ export async function renew(
   leaseTtlS?: number,
 ): Promise<number> {
   validateKey(key);
+  validateToken(token);
   const arg = leaseTtlS == null ? token : `${token} ${leaseTtlS}`;
   await writeAll(sock, encodeLines("n", key, arg));
 
@@ -398,6 +417,7 @@ export async function release(
   token: string,
 ): Promise<void> {
   validateKey(key);
+  validateToken(token);
   await writeAll(sock, encodeLines("r", key, token));
 
   const resp = await readline(sock);
@@ -449,6 +469,7 @@ export async function semRenew(
   leaseTtlS?: number,
 ): Promise<number> {
   validateKey(key);
+  validateToken(token);
   const arg = leaseTtlS == null ? token : `${token} ${leaseTtlS}`;
   await writeAll(sock, encodeLines("sn", key, arg));
 
@@ -522,6 +543,7 @@ export async function semRelease(
   token: string,
 ): Promise<void> {
   validateKey(key);
+  validateToken(token);
   await writeAll(sock, encodeLines("sr", key, token));
 
   const resp = await readline(sock);
@@ -787,6 +809,10 @@ abstract class DistributedPrimitive {
    * safe to call in `finally` blocks.
    */
   async release(): Promise<void> {
+    // Capture the token before awaiting anything — a concurrent renew
+    // failure can set this.token to null, which would cause us to skip the
+    // server-side release and leave the lock held until lease expiry.
+    const tokenToRelease = this.token;
     try {
       this.stopRenew();
       // Wait for any in-flight renew to finish before sending the release
@@ -798,9 +824,9 @@ abstract class DistributedPrimitive {
         // doRelease below.
         this.stopRenew();
       }
-      if (this.sock && this.token) {
+      if (this.sock && tokenToRelease) {
         try {
-          await this.doRelease(this.sock, this.token);
+          await this.doRelease(this.sock, tokenToRelease);
         } catch {
           // Best-effort: connection may already be dead.
         }
@@ -829,7 +855,9 @@ abstract class DistributedPrimitive {
     this.closed = false;
     this.sock = await this.openConnection();
     try {
+      this.suspendSocketTimeout(this.sock);
       const result = await this.doEnqueue(this.sock);
+      this.restoreSocketTimeout(this.sock);
       if (result.status === "acquired") {
         this.token = result.token;
         this.lease = result.lease ?? 0;

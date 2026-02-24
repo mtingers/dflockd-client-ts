@@ -840,9 +840,12 @@ abstract class DistributedPrimitive {
   /**
    * Release the lock / semaphore slot and close the connection.
    *
-   * This is best-effort: if the underlying connection is already dead the
-   * protocol-level release error is silently ignored so that `release()` is
-   * safe to call in `finally` blocks.
+   * Throws `LockError` if the instance is already closed (e.g. after a
+   * previous `release()` or `close()` call).
+   *
+   * The server-side release itself is best-effort: if the underlying
+   * connection is already dead the protocol-level release error is silently
+   * ignored so that the method doesn't throw on transient network failures.
    */
   async release(): Promise<void> {
     if (this.closed) {
@@ -918,6 +921,9 @@ abstract class DistributedPrimitive {
     if (this.token !== null) {
       // Already acquired during enqueue (fast path)
       return true;
+    }
+    if (this.closed) {
+      throw new LockError("connection closed; call enqueue() again");
     }
     if (!this.sock) {
       throw new LockError("not connected; call enqueue() first");

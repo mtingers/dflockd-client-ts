@@ -86,7 +86,7 @@ function writeAll(sock: net.Socket, data: Buffer): Promise<void> {
  */
 function parseLease(value: string | undefined, fallback: number = 30): number {
   if (value == null || value === "") return fallback;
-  const n = parseInt(value, 10);
+  const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
@@ -185,6 +185,7 @@ async function connect(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      s.removeListener("connect", onConnect);
       s.destroy();
       reject(err);
     };
@@ -202,6 +203,7 @@ async function connect(
         if (settled) return;
         settled = true;
         s.removeListener("error", onError);
+        s.removeListener("connect", onConnect);
         s.destroy();
         reject(
           new LockError(
@@ -317,11 +319,11 @@ export async function acquire(
   leaseTtlS?: number,
 ): Promise<{ token: string; lease: number }> {
   validateKey(key);
-  if (acquireTimeoutS < 0) {
-    throw new LockError("acquireTimeoutS must be >= 0");
+  if (!Number.isFinite(acquireTimeoutS) || acquireTimeoutS < 0) {
+    throw new LockError("acquireTimeoutS must be a finite number >= 0");
   }
-  if (leaseTtlS != null && leaseTtlS <= 0) {
-    throw new LockError("leaseTtlS must be > 0");
+  if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
+    throw new LockError("leaseTtlS must be a finite number > 0");
   }
   const arg =
     leaseTtlS == null
@@ -355,8 +357,8 @@ export async function renew(
 ): Promise<number> {
   validateKey(key);
   validateToken(token);
-  if (leaseTtlS != null && leaseTtlS <= 0) {
-    throw new LockError("leaseTtlS must be > 0");
+  if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
+    throw new LockError("leaseTtlS must be a finite number > 0");
   }
   const arg = leaseTtlS == null ? token : `${token} ${leaseTtlS}`;
   await writeAll(sock, encodeLines("n", key, arg));
@@ -380,8 +382,8 @@ export async function enqueue(
   leaseTtlS?: number,
 ): Promise<{ status: "acquired" | "queued"; token: string | null; lease: number | null }> {
   validateKey(key);
-  if (leaseTtlS != null && leaseTtlS <= 0) {
-    throw new LockError("leaseTtlS must be > 0");
+  if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
+    throw new LockError("leaseTtlS must be a finite number > 0");
   }
   // Lease TTL is optional for enqueue; empty arg means "use server default".
   const arg = leaseTtlS == null ? "" : String(leaseTtlS);
@@ -409,8 +411,8 @@ export async function waitForLock(
   waitTimeoutS: number,
 ): Promise<{ token: string; lease: number }> {
   validateKey(key);
-  if (waitTimeoutS < 0) {
-    throw new LockError("waitTimeoutS must be >= 0");
+  if (!Number.isFinite(waitTimeoutS) || waitTimeoutS < 0) {
+    throw new LockError("waitTimeoutS must be a finite number >= 0");
   }
   await writeAll(sock, encodeLines("w", key, String(waitTimeoutS)));
 
@@ -458,14 +460,14 @@ export async function semAcquire(
   leaseTtlS?: number,
 ): Promise<{ token: string; lease: number }> {
   validateKey(key);
-  if (acquireTimeoutS < 0) {
-    throw new LockError("acquireTimeoutS must be >= 0");
+  if (!Number.isFinite(acquireTimeoutS) || acquireTimeoutS < 0) {
+    throw new LockError("acquireTimeoutS must be a finite number >= 0");
   }
   if (!Number.isInteger(limit) || limit < 1) {
     throw new LockError("limit must be an integer >= 1");
   }
-  if (leaseTtlS != null && leaseTtlS <= 0) {
-    throw new LockError("leaseTtlS must be > 0");
+  if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
+    throw new LockError("leaseTtlS must be a finite number > 0");
   }
   const arg =
     leaseTtlS == null
@@ -499,8 +501,8 @@ export async function semRenew(
 ): Promise<number> {
   validateKey(key);
   validateToken(token);
-  if (leaseTtlS != null && leaseTtlS <= 0) {
-    throw new LockError("leaseTtlS must be > 0");
+  if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
+    throw new LockError("leaseTtlS must be a finite number > 0");
   }
   const arg = leaseTtlS == null ? token : `${token} ${leaseTtlS}`;
   await writeAll(sock, encodeLines("sn", key, arg));
@@ -528,8 +530,8 @@ export async function semEnqueue(
   if (!Number.isInteger(limit) || limit < 1) {
     throw new LockError("limit must be an integer >= 1");
   }
-  if (leaseTtlS != null && leaseTtlS <= 0) {
-    throw new LockError("leaseTtlS must be > 0");
+  if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
+    throw new LockError("leaseTtlS must be a finite number > 0");
   }
   const arg = leaseTtlS == null ? String(limit) : `${limit} ${leaseTtlS}`;
   await writeAll(sock, encodeLines("se", key, arg));
@@ -556,8 +558,8 @@ export async function semWaitForLock(
   waitTimeoutS: number,
 ): Promise<{ token: string; lease: number }> {
   validateKey(key);
-  if (waitTimeoutS < 0) {
-    throw new LockError("waitTimeoutS must be >= 0");
+  if (!Number.isFinite(waitTimeoutS) || waitTimeoutS < 0) {
+    throw new LockError("waitTimeoutS must be a finite number >= 0");
   }
   await writeAll(sock, encodeLines("sw", key, String(waitTimeoutS)));
 
@@ -713,11 +715,11 @@ abstract class DistributedPrimitive {
     this.connectTimeoutMs = opts.connectTimeoutMs;
     this.socketTimeoutMs = opts.socketTimeoutMs;
 
-    if (this.acquireTimeoutS < 0) {
-      throw new LockError("acquireTimeoutS must be >= 0");
+    if (!Number.isFinite(this.acquireTimeoutS) || this.acquireTimeoutS < 0) {
+      throw new LockError("acquireTimeoutS must be a finite number >= 0");
     }
-    if (this.leaseTtlS != null && this.leaseTtlS <= 0) {
-      throw new LockError("leaseTtlS must be > 0");
+    if (this.leaseTtlS != null && (!Number.isFinite(this.leaseTtlS) || this.leaseTtlS <= 0)) {
+      throw new LockError("leaseTtlS must be a finite number > 0");
     }
 
     if (opts.servers) {
@@ -904,8 +906,8 @@ abstract class DistributedPrimitive {
     try {
       this.suspendSocketTimeout(this.sock);
       const result = await this.doEnqueue(this.sock);
-      this.restoreSocketTimeout(this.sock);
       if (result.status === "acquired") {
+        this.restoreSocketTimeout(this.sock);
         this.token = result.token;
         this.lease = result.lease ?? 0;
         this.startRenew();

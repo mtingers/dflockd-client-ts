@@ -37,17 +37,17 @@ function validateKey(key: string): void {
   if (key === "") {
     throw new LockError("key must not be empty");
   }
-  if (/[\n\r]/.test(key)) {
+  if (/[\0\n\r]/.test(key)) {
     throw new LockError(
-      "key must not contain newline or carriage return characters",
+      "key must not contain NUL, newline, or carriage return characters",
     );
   }
 }
 
 function validateAuth(auth: string): void {
-  if (/[\n\r]/.test(auth)) {
+  if (/[\0\n\r]/.test(auth)) {
     throw new LockError(
-      "auth token must not contain newline or carriage return characters",
+      "auth token must not contain NUL, newline, or carriage return characters",
     );
   }
 }
@@ -56,9 +56,9 @@ function validateToken(token: string): void {
   if (token === "") {
     throw new LockError("token must not be empty");
   }
-  if (/[\n\r]/.test(token)) {
+  if (/[\0\n\r]/.test(token)) {
     throw new LockError(
-      "token must not contain newline or carriage return characters",
+      "token must not contain NUL, newline, or carriage return characters",
     );
   }
 }
@@ -173,6 +173,9 @@ async function connect(
     let timer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
 
+    // tls.connect() registers the callback on "secureConnect", not "connect".
+    const connectEvent = tlsOptions ? "secureConnect" : "connect";
+
     const onConnect = () => {
       if (settled) return;
       settled = true;
@@ -185,7 +188,7 @@ async function connect(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      s.removeListener("connect", onConnect);
+      s.removeListener(connectEvent, onConnect);
       s.destroy();
       reject(err);
     };
@@ -203,7 +206,7 @@ async function connect(
         if (settled) return;
         settled = true;
         s.removeListener("error", onError);
-        s.removeListener("connect", onConnect);
+        s.removeListener(connectEvent, onConnect);
         s.destroy();
         reject(
           new LockError(
@@ -1001,11 +1004,12 @@ abstract class DistributedPrimitive {
     this.stopRenew();
     const loop = async () => {
       const savedToken = this.token;
-      if (!this.sock || !savedToken) return;
+      const sock = this.sock;
+      if (!sock || !savedToken) return;
       const start = Date.now();
       const p = (async () => {
         try {
-          this.lease = await this.doRenew(this.sock!, savedToken);
+          this.lease = await this.doRenew(sock, savedToken);
         } catch {
           // Only signal lock-lost if we still own this token (close() may have cleared it)
           if (this.token === savedToken) {

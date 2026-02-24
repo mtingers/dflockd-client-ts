@@ -8,17 +8,17 @@ const DEFAULT_PORT = 6388;
 // Errors
 // ---------------------------------------------------------------------------
 
-export class AcquireTimeoutError extends Error {
-  constructor(key: string) {
-    super(`timeout acquiring '${key}'`);
-    this.name = "AcquireTimeoutError";
-  }
-}
-
 export class LockError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "LockError";
+  }
+}
+
+export class AcquireTimeoutError extends LockError {
+  constructor(key: string) {
+    super(`timeout acquiring '${key}'`);
+    this.name = "AcquireTimeoutError";
   }
 }
 
@@ -42,16 +42,29 @@ function encodeLines(...lines: string[]): Buffer {
  * Resolves with the line (without trailing \r\n).
  * Rejects if the connection closes before a full line arrives.
  */
+const _readlineBuf = new WeakMap<net.Socket, string>();
+
 function readline(sock: net.Socket): Promise<string> {
   return new Promise((resolve, reject) => {
-    let buf = "";
+    let buf = _readlineBuf.get(sock) ?? "";
+
+    // Check if a complete line is already buffered from a previous read.
+    const existing = buf.indexOf("\n");
+    if (existing !== -1) {
+      const line = buf.slice(0, existing).replace(/\r$/, "");
+      _readlineBuf.set(sock, buf.slice(existing + 1));
+      resolve(line);
+      return;
+    }
 
     const onData = (chunk: Buffer) => {
       buf += chunk.toString("utf-8");
       const idx = buf.indexOf("\n");
       if (idx !== -1) {
         cleanup();
-        resolve(buf.slice(0, idx).replace(/\r$/, ""));
+        const line = buf.slice(0, idx).replace(/\r$/, "");
+        _readlineBuf.set(sock, buf.slice(idx + 1));
+        resolve(line);
       }
     };
 
@@ -85,15 +98,25 @@ async function connect(
 ): Promise<net.Socket> {
   const sock = await new Promise<net.Socket>((resolve, reject) => {
     if (tlsOptions) {
-      const s = tls.connect({ host, port, ...tlsOptions }, () => resolve(s));
+      const s = tls.connect({ host, port, ...tlsOptions }, () => {
+        s.removeListener("error", reject);
+        resolve(s);
+      });
       s.on("error", reject);
     } else {
-      const s = net.createConnection({ host, port }, () => resolve(s));
+      const s = net.createConnection({ host, port }, () => {
+        s.removeListener("error", reject);
+        resolve(s);
+      });
       s.on("error", reject);
     }
   });
 
-  if (auth != null) {
+  // Prevent unhandled 'error' events from crashing the process.
+  // Errors are detected through readline's close handler.
+  sock.on("error", () => {});
+
+  if (auth != null && auth !== "") {
     sock.write(encodeLines("auth", "_", auth));
     const resp = await readline(sock);
     if (resp === "ok") {
@@ -228,7 +251,7 @@ export async function renew(
   if (parts.length >= 2 && /^\d+$/.test(parts[1])) {
     return parseInt(parts[1], 10);
   }
-  return -1;
+  throw new LockError(`renew: malformed response: '${resp}'`);
 }
 
 export async function enqueue(
@@ -339,7 +362,7 @@ export async function semRenew(
   if (parts.length >= 2 && /^\d+$/.test(parts[1])) {
     return parseInt(parts[1], 10);
   }
-  return -1;
+  throw new LockError(`sem_renew: malformed response: '${resp}'`);
 }
 
 export async function semEnqueue(
@@ -455,6 +478,7 @@ export interface DistributedLockOptions {
   renewRatio?: number;
   tls?: tls.ConnectionOptions;
   auth?: string;
+  onLockLost?: (key: string, token: string) => void;
 }
 
 export class DistributedLock {
@@ -466,6 +490,7 @@ export class DistributedLock {
   readonly renewRatio: number;
   readonly tls: tls.ConnectionOptions | undefined;
   readonly auth: string | undefined;
+  readonly onLockLost: ((key: string, token: string) => void) | undefined;
 
   token: string | null = null;
   lease: number = 0;
@@ -480,6 +505,7 @@ export class DistributedLock {
     this.leaseTtlS = opts.leaseTtlS;
     this.tls = opts.tls;
     this.auth = opts.auth;
+    this.onLockLost = opts.onLockLost;
 
     if (opts.servers) {
       if (opts.servers.length === 0) {
@@ -496,11 +522,17 @@ export class DistributedLock {
 
   private pickServer(): [string, number] {
     const idx = this.shardingStrategy(this.key, this.servers.length);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= this.servers.length) {
+      throw new LockError(
+        `shardingStrategy returned invalid index ${idx} for ${this.servers.length} server(s)`,
+      );
+    }
     return this.servers[idx];
   }
 
   /** Acquire the lock. Returns `true` on success, `false` on timeout. */
   async acquire(): Promise<boolean> {
+    await this.close();
     this.closed = false;
     const [host, port] = this.pickServer();
     this.sock = await connect(host, port, this.tls, this.auth);
@@ -540,6 +572,7 @@ export class DistributedLock {
    * If acquired immediately, the renew loop starts automatically.
    */
   async enqueue(): Promise<"acquired" | "queued"> {
+    await this.close();
     this.closed = false;
     const [host, port] = this.pickServer();
     this.sock = await connect(host, port, this.tls, this.auth);
@@ -627,10 +660,11 @@ export class DistributedLock {
       try {
         await renew(this.sock, this.key, this.token, this.leaseTtlS);
       } catch {
-        console.error(
-          `lock lost (renew failed): key=${this.key} token=${this.token}`,
-        );
+        const lostToken = this.token!;
         this.token = null;
+        if (this.onLockLost) {
+          this.onLockLost(this.key, lostToken);
+        }
         return;
       }
       this.renewTimer = setTimeout(loop, interval);
@@ -664,6 +698,7 @@ export interface DistributedSemaphoreOptions {
   renewRatio?: number;
   tls?: tls.ConnectionOptions;
   auth?: string;
+  onLockLost?: (key: string, token: string) => void;
 }
 
 export class DistributedSemaphore {
@@ -676,6 +711,7 @@ export class DistributedSemaphore {
   readonly renewRatio: number;
   readonly tls: tls.ConnectionOptions | undefined;
   readonly auth: string | undefined;
+  readonly onLockLost: ((key: string, token: string) => void) | undefined;
 
   token: string | null = null;
   lease: number = 0;
@@ -691,6 +727,7 @@ export class DistributedSemaphore {
     this.leaseTtlS = opts.leaseTtlS;
     this.tls = opts.tls;
     this.auth = opts.auth;
+    this.onLockLost = opts.onLockLost;
 
     if (opts.servers) {
       if (opts.servers.length === 0) {
@@ -707,11 +744,17 @@ export class DistributedSemaphore {
 
   private pickServer(): [string, number] {
     const idx = this.shardingStrategy(this.key, this.servers.length);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= this.servers.length) {
+      throw new LockError(
+        `shardingStrategy returned invalid index ${idx} for ${this.servers.length} server(s)`,
+      );
+    }
     return this.servers[idx];
   }
 
   /** Acquire a semaphore slot. Returns `true` on success, `false` on timeout. */
   async acquire(): Promise<boolean> {
+    await this.close();
     this.closed = false;
     const [host, port] = this.pickServer();
     this.sock = await connect(host, port, this.tls, this.auth);
@@ -752,6 +795,7 @@ export class DistributedSemaphore {
    * If acquired immediately, the renew loop starts automatically.
    */
   async enqueue(): Promise<"acquired" | "queued"> {
+    await this.close();
     this.closed = false;
     const [host, port] = this.pickServer();
     this.sock = await connect(host, port, this.tls, this.auth);
@@ -838,10 +882,11 @@ export class DistributedSemaphore {
       try {
         await semRenew(this.sock, this.key, this.token, this.leaseTtlS);
       } catch {
-        console.error(
-          `semaphore lost (renew failed): key=${this.key} token=${this.token}`,
-        );
+        const lostToken = this.token!;
         this.token = null;
+        if (this.onLockLost) {
+          this.onLockLost(this.key, lostToken);
+        }
         return;
       }
       this.renewTimer = setTimeout(loop, interval);

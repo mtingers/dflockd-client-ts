@@ -154,6 +154,109 @@ describe("AuthError", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Bug #3: AcquireTimeoutError extends LockError
+// ---------------------------------------------------------------------------
+
+describe("AcquireTimeoutError", () => {
+  it("is an instance of LockError", () => {
+    const err = new AcquireTimeoutError("my-key");
+    assert.ok(err instanceof LockError);
+    assert.ok(err instanceof Error);
+    assert.equal(err.name, "AcquireTimeoutError");
+    assert.match(err.message, /my-key/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4: onLockLost callback option
+// ---------------------------------------------------------------------------
+
+describe("DistributedLock onLockLost option", () => {
+  it("stores onLockLost on the instance", () => {
+    const cb = (_key: string, _token: string) => {};
+    const lock = new DistributedLock({ key: "k", onLockLost: cb });
+    assert.equal(lock.onLockLost, cb);
+  });
+
+  it("defaults onLockLost to undefined when not provided", () => {
+    const lock = new DistributedLock({ key: "k" });
+    assert.equal(lock.onLockLost, undefined);
+  });
+});
+
+describe("DistributedSemaphore onLockLost option", () => {
+  it("stores onLockLost on the instance", () => {
+    const cb = (_key: string, _token: string) => {};
+    const sem = new DistributedSemaphore({ key: "k", limit: 3, onLockLost: cb });
+    assert.equal(sem.onLockLost, cb);
+  });
+
+  it("defaults onLockLost to undefined when not provided", () => {
+    const sem = new DistributedSemaphore({ key: "k", limit: 3 });
+    assert.equal(sem.onLockLost, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #10: pickServer bounds checking
+// ---------------------------------------------------------------------------
+
+describe("DistributedLock pickServer bounds checking", () => {
+  it("throws LockError when shardingStrategy returns negative index", async () => {
+    const lock = new DistributedLock({
+      key: "k",
+      shardingStrategy: () => -1,
+    });
+    await assert.rejects(() => lock.acquire(), LockError);
+  });
+
+  it("throws LockError when shardingStrategy returns index >= servers.length", async () => {
+    const lock = new DistributedLock({
+      key: "k",
+      shardingStrategy: () => 1,
+      // only 1 server, so index 1 is out of bounds
+    });
+    await assert.rejects(() => lock.acquire(), LockError);
+  });
+
+  it("throws LockError when shardingStrategy returns non-integer", async () => {
+    const lock = new DistributedLock({
+      key: "k",
+      shardingStrategy: () => 0.5,
+    });
+    await assert.rejects(() => lock.acquire(), LockError);
+  });
+
+  it("throws LockError when shardingStrategy returns NaN", async () => {
+    const lock = new DistributedLock({
+      key: "k",
+      shardingStrategy: () => NaN,
+    });
+    await assert.rejects(() => lock.acquire(), LockError);
+  });
+});
+
+describe("DistributedSemaphore pickServer bounds checking", () => {
+  it("throws LockError when shardingStrategy returns negative index", async () => {
+    const sem = new DistributedSemaphore({
+      key: "k",
+      limit: 3,
+      shardingStrategy: () => -1,
+    });
+    await assert.rejects(() => sem.acquire(), LockError);
+  });
+
+  it("throws LockError when shardingStrategy returns index >= servers.length", async () => {
+    const sem = new DistributedSemaphore({
+      key: "k",
+      limit: 3,
+      shardingStrategy: () => 1,
+    });
+    await assert.rejects(() => sem.acquire(), LockError);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Integration tests (require a running dflockd on 127.0.0.1:6388)
 // ---------------------------------------------------------------------------
 
@@ -578,5 +681,50 @@ describe("integration: sharding routes to correct server", () => {
 
     await assert.rejects(() => lock.acquire());
     await lock.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #7: Reuse of DistributedLock / DistributedSemaphore
+// ---------------------------------------------------------------------------
+
+describe("integration: lock reuse (issue #7)", () => {
+  it("can acquire() twice on the same DistributedLock instance", async () => {
+    const lock = new DistributedLock({ key: "test-reuse-lock" });
+
+    const ok1 = await lock.acquire();
+    assert.equal(ok1, true);
+    await lock.release();
+
+    // Second acquire on same instance should work without leaking the socket
+    const ok2 = await lock.acquire();
+    assert.equal(ok2, true);
+    await lock.release();
+  });
+
+  it("can acquire() twice on the same DistributedSemaphore instance", async () => {
+    const sem = new DistributedSemaphore({ key: "test-reuse-sem", limit: 3 });
+
+    const ok1 = await sem.acquire();
+    assert.equal(ok1, true);
+    await sem.release();
+
+    const ok2 = await sem.acquire();
+    assert.equal(ok2, true);
+    await sem.release();
+  });
+
+  it("acquire() cleans up previous connection when called without release", async () => {
+    const lock = new DistributedLock({ key: "test-reuse-no-release", leaseTtlS: 2 });
+
+    const ok1 = await lock.acquire();
+    assert.equal(ok1, true);
+    const token1 = lock.token;
+
+    // Call acquire again without releasing — should not leak the old socket
+    const ok2 = await lock.acquire();
+    assert.equal(ok2, true);
+    assert.ok(lock.token !== token1, "should get a new token");
+    await lock.release();
   });
 });

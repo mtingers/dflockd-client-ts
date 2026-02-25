@@ -226,8 +226,14 @@ async function connect(
 
   if (auth != null && auth !== "") {
     validateAuth(auth);
-    await writeAll(sock, encodeLines("auth", "_", auth));
-    const resp = await readline(sock);
+    let resp: string;
+    try {
+      await writeAll(sock, encodeLines("auth", "_", auth));
+      resp = await readline(sock);
+    } catch (err) {
+      sock.destroy();
+      throw err;
+    }
     if (resp === "ok") {
       return sock;
     }

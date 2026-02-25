@@ -1589,6 +1589,66 @@ describe("readline edge cases (mock server)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Connection leak: auth handshake failure destroys socket
+// ---------------------------------------------------------------------------
+
+describe("connect() auth handshake socket cleanup", () => {
+  it("destroys socket when server closes during auth", async () => {
+    // Server accepts the connection then immediately closes it,
+    // simulating a crash during the auth handshake.
+    const server = net.createServer((conn) => {
+      conn.destroy();
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as net.AddressInfo).port;
+    try {
+      const lock = new DistributedLock({
+        key: "k",
+        host: "127.0.0.1",
+        port,
+        auth: "my-secret",
+      });
+      // The error may be ECONNRESET (native) or LockError depending on timing
+      await assert.rejects(() => lock.acquire());
+      // After the error, the lock should be fully closed (no leaked socket)
+      lock.close();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("destroys socket on auth rejection", async () => {
+    // Server responds with auth failure
+    const server = net.createServer((conn) => {
+      let buf = "";
+      conn.on("data", (chunk) => {
+        buf += chunk.toString("utf-8");
+        if (buf.includes("\n")) {
+          conn.write("error_auth\n");
+        }
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as net.AddressInfo).port;
+    try {
+      const lock = new DistributedLock({
+        key: "k",
+        host: "127.0.0.1",
+        port,
+        auth: "wrong-secret",
+      });
+      await assert.rejects(() => lock.acquire(), (err: unknown) => {
+        assert.ok(err instanceof Error);
+        return true;
+      });
+      lock.close();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Integration tests (require a running dflockd on 127.0.0.1:6388)
 // ---------------------------------------------------------------------------
 

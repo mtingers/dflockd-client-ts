@@ -1,61 +1,72 @@
 # Changelog
 
-## 1.9.0
+All notable changes to this project will be documented in this file.
 
-### Features
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-- Add `connectTimeoutMs` option to `DistributedLock`, `DistributedSemaphore`, and `stats()` for TCP connect timeout control
-- Add `socketTimeoutMs` option to `DistributedLock` and `DistributedSemaphore` for socket idle timeout detection
-- Extracted shared `DistributedPrimitive` base class for `DistributedLock` and `DistributedSemaphore`
+## [v1.9.0] - 2026-02-24
 
-### Bug fixes
+### Added
 
-- Fix `release()` race condition: capture socket and token before awaiting in-flight renew, preventing a concurrent `close()` from nulling them
-- Fix renew failure leaving the connection open and the instance in a dirty state; `onLockLost` now automatically closes the connection so the instance can be re-acquired without `{ force: true }`
-- Fix socket leak in `connect()` when the auth handshake throws (socket is now destroyed before re-throwing)
-- Fix socket leak in TLS listener path: remove temporary `error` and connect listeners after settling
-- Fix renew loop race: save the token before the async renew call, preventing `close()` from clearing it mid-flight
-- Fix NUL byte injection: validate keys and tokens against `\0` characters in all protocol functions and constructors
-- Fix `parseLease` accepting garbage strings (e.g. `"abc"`, `"NaN"`); now requires `Number.isFinite` and falls back to default
-- Fix `renewRatio` accepting `NaN` and `Infinity`; now validated with `Number.isFinite`
-- Fix `release()` silently succeeding after `close()` — now throws `LockError`
-- Fix `wait()` error message after `close()` (was "not connected", now "connection closed; call enqueue() again")
-- Fix `enqueue()` not suspending socket idle timeout during the blocking server call
-- Fix connect listener leaks: remove the opposing listener (`error`/`connect`) after one fires
-- Fix `close()` to be synchronous (was unnecessarily `async`)
-- Add `readline` max line length guard (1 MB) to prevent unbounded memory growth
+- `connectTimeoutMs` option to `DistributedLock`, `DistributedSemaphore`, and `stats()` for TCP connect timeout control
+- `socketTimeoutMs` option to `DistributedLock` and `DistributedSemaphore` for socket idle timeout detection
+- `readline` max line length guard (1 MB) to prevent unbounded memory growth
 - All protocol functions (`acquire`, `renew`, `release`, `enqueue`, `waitForLock`, `semAcquire`, `semRenew`, `semRelease`, `semEnqueue`, `semWaitForLock`) now validate inputs and throw `LockError` on invalid keys, tokens, timeouts, or limits
 - Constructor now validates `acquireTimeoutS`, `leaseTtlS`, and `renewRatio` with `Number.isFinite` checks to reject `NaN` and `Infinity`
-- Sharding strategy return value is validated for bounds, integrality, and `NaN`
 
-## 1.8.3
+### Fixed
 
-### Improvements
+- `release()` race condition: capture socket and token before awaiting in-flight renew, preventing a concurrent `close()` from nulling them
+- Renew failure leaving the connection open and the instance in a dirty state; `onLockLost` now automatically closes the connection so the instance can be re-acquired without `{ force: true }`
+- Socket leak in `connect()` when the auth handshake throws (socket is now destroyed before re-throwing)
+- Socket leak in TLS listener path: remove temporary `error` and connect listeners after settling
+- Renew loop race: save the token before the async renew call, preventing `close()` from clearing it mid-flight
+- NUL byte injection: validate keys and tokens against `\0` characters in all protocol functions and constructors
+- `parseLease` accepting garbage strings (e.g. `"abc"`, `"NaN"`); now requires `Number.isFinite` and falls back to default
+- `renewRatio` accepting `NaN` and `Infinity`; now validated with `Number.isFinite`
+- `release()` silently succeeding after `close()` — now throws `LockError`
+- `wait()` error message after `close()` (was "not connected", now "connection closed; call enqueue() again")
+- `enqueue()` not suspending socket idle timeout during the blocking server call
+- Connect listener leaks: remove the opposing listener (`error`/`connect`) after one fires
+- `close()` to be synchronous (was unnecessarily `async`)
+- Sharding strategy return value validated for bounds, integrality, and `NaN`
+
+### Changed
+
+- Extracted shared `DistributedPrimitive` base class for `DistributedLock` and `DistributedSemaphore`
+
+## [v1.8.3] - 2026-02-24
+
+### Changed
 
 - Renewal timers now call `.unref()` so they don't keep the Node.js event loop alive if a user forgets to call `release()`/`close()`
 
-## 1.8.2
+## [v1.8.2] - 2026-02-24
 
-### Bug fixes
+### Fixed
 
 - `renew`/`semRenew` response check tightened to reject responses like `"okay"` that incorrectly matched `startsWith("ok")`
 - `startRenew` loop now uses the lease value returned by the server on each renewal, recalculates the interval, and subtracts round-trip elapsed time
 - `startRenew` saves the token before the async renew call, preventing a race where `close()` clears the token mid-flight
 - `stats()` now wraps `JSON.parse` and throws `LockError` on malformed JSON responses
-- Fix inconsistent default lease fallback: `enqueue`/`waitForLock` used `33` instead of `30`
+- Inconsistent default lease fallback: `enqueue`/`waitForLock` used `33` instead of `30`
 - All `sock.write()` calls now await the write callback via `writeAll()`, properly handling TCP backpressure
 - `readline` cleans up its internal buffer on socket error/close
 - `close()` is now synchronous (was unnecessarily `async`)
+
+### Changed
+
 - Enable `setNoDelay` on sockets for lower latency
 - Defensive copy of `servers` array in constructors
 
-## 1.8.0
+## [v1.8.0] - 2026-02-24
 
-### Features
+### Added
 
-- Add `onLockLost` callback option to `DistributedLock` and `DistributedSemaphore`, called when background lease renewal fails
+- `onLockLost` callback option to `DistributedLock` and `DistributedSemaphore`, called when background lease renewal fails
 
-### Bug fixes
+### Fixed
 
 - `AcquireTimeoutError` now extends `LockError` (was `Error`), so `catch (err instanceof LockError)` catches timeouts too
 - `readline` now persists leftover bytes between calls, fixing data loss when the server sends multiple lines in a single TCP segment
@@ -66,40 +77,54 @@
 - `auth` option no longer sends an auth command for empty strings
 - `shardingStrategy` return value is now validated; out-of-bounds or non-integer values throw `LockError`
 
-## 1.6.0
+## [v1.6.0] - 2026-02-18
 
-- Add `auth` option to `DistributedLock`, `DistributedSemaphore`, and `stats()` for token-based authentication (`--auth-token`)
-- Add `AuthError` class (extends `LockError`) thrown on authentication failure
+### Added
 
-## 1.5.0
+- `auth` option to `DistributedLock`, `DistributedSemaphore`, and `stats()` for token-based authentication (`--auth-token`)
+- `AuthError` class (extends `LockError`) thrown on authentication failure
 
-- Add `tls` option to `DistributedLock`, `DistributedSemaphore`, and `stats()` for TLS-encrypted connections
+## [v1.5.0] - 2026-02-18
 
-## 1.4.0
+### Added
 
-- Add `stats()` function to query server runtime statistics (connections, locks, semaphores, idle entries)
+- `tls` option to `DistributedLock`, `DistributedSemaphore`, and `stats()` for TLS-encrypted connections
+
+## [v1.4.0] - 2026-02-18
+
+### Added
+
+- `stats()` function to query server runtime statistics (connections, locks, semaphores, idle entries)
 - Export `Stats`, `StatsLock`, `StatsSemaphore`, `StatsIdleLock`, `StatsIdleSemaphore` interfaces
 
-## 1.2.0
+## [v1.2.0] - 2026-02-16
 
-- Add `DistributedSemaphore` class with `acquire`, `release`, `withLock`, `enqueue`, and `wait`
-- Add low-level semaphore protocol functions: `semAcquire`, `semRenew`, `semRelease`, `semEnqueue`, `semWaitForLock`
+### Added
+
+- `DistributedSemaphore` class with `acquire`, `release`, `withLock`, `enqueue`, and `wait`
+- Low-level semaphore protocol functions: `semAcquire`, `semRenew`, `semRelease`, `semEnqueue`, `semWaitForLock`
 - Export `DistributedSemaphoreOptions` interface
 - Semaphore supports up to N concurrent holders per key (configurable via `limit`)
 - Semaphore shares the same sharding, auto-renewal, and two-phase enqueue/wait patterns as `DistributedLock`
 
-## 1.1.0
+## [v1.1.0] - 2026-02-15
 
-- Add multi-server sharding with consistent CRC32-based hashing (matches Python's `zlib.crc32`)
-- Add `servers` option to distribute locks across multiple dflockd instances
-- Add `shardingStrategy` option for custom key-to-server routing
+### Added
+
+- Multi-server sharding with consistent CRC32-based hashing (matches Python's `zlib.crc32`)
+- `servers` option to distribute locks across multiple dflockd instances
+- `shardingStrategy` option for custom key-to-server routing
 - Export `ShardingStrategy` type and `stableHashShard` function
-- Deprecate `host` and `port` options in favor of `servers`
-- Add test suite (20 tests covering sharding, locking, and enqueue/wait)
+- Test suite (20 tests covering sharding, locking, and enqueue/wait)
 
-## 1.0.0
+### Deprecated
 
-- Initial release
+- `host` and `port` options in favor of `servers`
+
+## [v1.0.0] - 2026-02-15
+
+### Added
+
 - `DistributedLock` class with `acquire`, `release`, `withLock`, `enqueue`, and `wait`
 - Automatic lease renewal
 - Low-level protocol functions: `acquire`, `renew`, `release`, `enqueue`, `waitForLock`

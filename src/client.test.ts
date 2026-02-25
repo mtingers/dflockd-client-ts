@@ -1421,6 +1421,101 @@ describe("DistributedLock with mock server", () => {
   });
 });
 
+describe("renew failure tears down connection", () => {
+  it("close()s the instance so acquire() can be called again", async () => {
+    let callCount = 0;
+    const { server, port } = await createMockServer((_lines, respond) => {
+      callCount++;
+      if (callCount === 1) {
+        // acquire succeeds with a very short lease so the renew fires quickly
+        respond("ok tok1 1");
+      } else {
+        // renew fails
+        respond("error_expired");
+      }
+    });
+    try {
+      let lostKey: string | undefined;
+      let lostToken: string | undefined;
+      const lock = new DistributedLock({
+        key: "k",
+        host: "127.0.0.1",
+        port,
+        renewRatio: 0.01, // renew fires almost immediately
+        onLockLost: (k, t) => {
+          lostKey = k;
+          lostToken = t;
+        },
+      });
+      await lock.acquire();
+      assert.equal(lock.token, "tok1");
+
+      // Wait long enough for the renew to fire and fail.
+      // Min renew interval is Math.max(1, lease * ratio) * 1000 = 1000ms.
+      await new Promise((r) => setTimeout(r, 1500));
+
+      // onLockLost should have been called
+      assert.equal(lostKey, "k");
+      assert.equal(lostToken, "tok1");
+
+      // Instance should be fully closed: token/lease reset, socket torn down
+      assert.equal(lock.token, null);
+      assert.equal(lock.lease, 0);
+
+      // A subsequent acquire() without { force: true } should NOT throw
+      // "already connected" — it should attempt a fresh connection.
+      // We close the mock server first so acquire() will fail with a
+      // connection error, which proves it tried to connect (not rejected
+      // with "already connected").
+      await closeMockServer(server);
+      const err = await lock.acquire().then(
+        () => null,
+        (e: Error) => e,
+      );
+      // Should be a connection error, not "already connected"
+      assert.ok(err !== null, "expected acquire() to fail after server closed");
+      assert.ok(
+        !err!.message.includes("already connected"),
+        `expected connection error, got: ${err!.message}`,
+      );
+    } finally {
+      // Server may already be closed above; ignore errors
+      await closeMockServer(server).catch(() => {});
+    }
+  });
+
+  it("cleans up even without onLockLost callback", async () => {
+    let callCount = 0;
+    const { server, port } = await createMockServer((_lines, respond) => {
+      callCount++;
+      if (callCount === 1) {
+        respond("ok tok1 1");
+      } else {
+        respond("error_expired");
+      }
+    });
+    try {
+      const lock = new DistributedLock({
+        key: "k",
+        host: "127.0.0.1",
+        port,
+        renewRatio: 0.01,
+        // no onLockLost
+      });
+      await lock.acquire();
+      assert.equal(lock.token, "tok1");
+
+      await new Promise((r) => setTimeout(r, 1500));
+
+      // Instance should still be cleaned up
+      assert.equal(lock.token, null);
+      assert.equal(lock.lease, 0);
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
 describe("DistributedSemaphore with mock server", () => {
   it("acquire and release round-trip", async () => {
     let callCount = 0;

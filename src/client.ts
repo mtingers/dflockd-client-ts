@@ -1035,6 +1035,11 @@ abstract class DistributedPrimitive {
                 // Never let a user callback crash the process.
               }
             }
+            // Tear down the connection so the instance is in a clean state
+            // for re-acquisition.  Without this the socket leaks and a
+            // subsequent acquire() without { force: true } would throw
+            // "already connected".
+            this.close();
           }
           return;
         }

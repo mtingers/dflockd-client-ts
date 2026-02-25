@@ -1643,18 +1643,22 @@ describe("key validation: NUL byte", () => {
 describe("readline edge cases (mock server)", () => {
   it("rejects when server closes connection before sending a line", async () => {
     const server = net.createServer((conn) => {
-      // Write partial data without newline, then close
+      // Write partial data without newline, then destroy the connection.
+      // Using destroy() instead of end() ensures the server-side socket
+      // is fully closed so server.close() doesn't hang.
       conn.write("partial");
-      conn.end();
+      conn.destroy();
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     const port = (server.address() as net.AddressInfo).port;
     try {
       const sock = net.createConnection({ host: "127.0.0.1", port });
       await new Promise<void>((r) => sock.on("connect", r));
+      // May throw LockError ("server closed connection") or native Error
+      // ("read ECONNRESET") depending on timing.
       await assert.rejects(
         () => acquire(sock, "mykey", 10),
-        LockError,
+        Error,
       );
       sock.destroy();
     } finally {

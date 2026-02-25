@@ -155,6 +155,14 @@ function readline(sock: net.Socket): Promise<string> {
       sock.removeListener("end", onEnd);
     };
 
+    // If the readable side already ended (e.g. the server closed before we
+    // started reading), the 'end'/'close' events won't fire again.
+    if (sock.readableEnded || sock.destroyed) {
+      _readlineBuf.delete(sock);
+      reject(new LockError("server closed connection"));
+      return;
+    }
+
     sock.on("data", onData);
     sock.on("error", onError);
     sock.on("close", onClose);

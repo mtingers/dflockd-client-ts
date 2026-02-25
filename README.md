@@ -113,6 +113,8 @@ without blocking. If the lock is contended, `enqueue()` returns `"queued"` and
 | `tls`              | `tls.ConnectionOptions`       | `undefined`              | TLS options; pass `{}` for default system CA       |
 | `auth`             | `string`                      | `undefined`              | Auth token for servers started with `--auth-token` |
 | `onLockLost`       | `(key: string, token: string) => void` | `undefined`     | Called when background lease renewal fails and the lock is lost |
+| `connectTimeoutMs` | `number`                      | `undefined`              | TCP connect timeout in milliseconds               |
+| `socketTimeoutMs`  | `number`                      | `undefined`              | Socket idle timeout in milliseconds               |
 
 ### Multi-server sharding
 
@@ -242,6 +244,8 @@ try {
 | `tls`              | `tls.ConnectionOptions`       | `undefined`              | TLS options; pass `{}` for default system CA       |
 | `auth`             | `string`                      | `undefined`              | Auth token for servers started with `--auth-token` |
 | `onLockLost`       | `(key: string, token: string) => void` | `undefined`     | Called when background lease renewal fails and the slot is lost |
+| `connectTimeoutMs` | `number`                      | `undefined`              | TCP connect timeout in milliseconds               |
+| `socketTimeoutMs`  | `number`                      | `undefined`              | Socket idle timeout in milliseconds               |
 
 ## Stats
 

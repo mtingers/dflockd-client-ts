@@ -29,7 +29,9 @@ const lock = new DistributedLock({
 | `renewRatio`       | `number`                      | `0.5`                    | Renew at `lease * ratio` seconds (e.g. 50% of TTL)|
 | `tls`              | `tls.ConnectionOptions`       | `undefined`              | TLS options; pass `{}` for default system CA       |
 | `auth`             | `string`                      | `undefined`              | Auth token for servers started with `--auth-token` |
-| `onLockLost`       | `(key: string, token: string) => void` | `undefined`     | Called when background lease renewal fails and the lock is lost |
+| `onLockLost`       | `(key: string, token: string) => void` | `undefined`     | Called when background lease renewal fails and the lock is lost; the connection is automatically closed afterwards |
+| `connectTimeoutMs` | `number`                      | `undefined`              | TCP connect timeout in milliseconds; `undefined` means no timeout |
+| `socketTimeoutMs`  | `number`                      | `undefined`              | Socket idle timeout in milliseconds; destroys the socket if no data is received within this period |
 
 ## Methods
 
@@ -62,6 +64,8 @@ if (!ok) {
 
 Release the lock and close the connection. Stops background lease renewal.
 
+Throws `LockError` if the instance is already closed (e.g. after a previous `release()` or `close()` call).
+
 ```ts
 await lock.release();
 ```
@@ -87,7 +91,7 @@ Two-phase step 2: block until the lock is granted. Returns `true` if granted, `f
 const granted = await lock.wait(10);
 ```
 
-### `close(): Promise<void>`
+### `close(): void`
 
 Close the underlying socket without sending a release command. The server will auto-release the lock when the lease expires. Idempotent.
 

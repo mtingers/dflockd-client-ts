@@ -30,7 +30,9 @@ const sem = new DistributedSemaphore({
 | `renewRatio`       | `number`                      | `0.5`                    | Renew at `lease * ratio` seconds (e.g. 50% of TTL)|
 | `tls`              | `tls.ConnectionOptions`       | `undefined`              | TLS options; pass `{}` for default system CA       |
 | `auth`             | `string`                      | `undefined`              | Auth token for servers started with `--auth-token` |
-| `onLockLost`       | `(key: string, token: string) => void` | `undefined`     | Called when background lease renewal fails and the slot is lost |
+| `onLockLost`       | `(key: string, token: string) => void` | `undefined`     | Called when background lease renewal fails and the slot is lost; the connection is automatically closed afterwards |
+| `connectTimeoutMs` | `number`                      | `undefined`              | TCP connect timeout in milliseconds; `undefined` means no timeout |
+| `socketTimeoutMs`  | `number`                      | `undefined`              | Socket idle timeout in milliseconds; destroys the socket if no data is received within this period |
 
 ## Methods
 
@@ -58,6 +60,8 @@ const ok = await sem.acquire();
 
 Release the semaphore slot and close the connection.
 
+Throws `LockError` if the instance is already closed (e.g. after a previous `release()` or `close()` call).
+
 ```ts
 await sem.release();
 ```
@@ -72,7 +76,7 @@ Throws `LockError` if already connected. Pass `{ force: true }` to close first.
 
 Two-phase step 2: block until a semaphore slot is granted. Returns `true` if granted, `false` on timeout.
 
-### `close(): Promise<void>`
+### `close(): void`
 
 Close the underlying socket without releasing. Idempotent.
 

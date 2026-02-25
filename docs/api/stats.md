@@ -23,6 +23,7 @@ console.log(`semaphores active: ${s.semaphores.length}`);
 | `port` | `number`                | `6388`        | Server port                    |
 | `tls`  | `tls.ConnectionOptions` | `undefined`   | TLS options                    |
 | `auth` | `string`                | `undefined`   | Auth token                     |
+| `connectTimeoutMs` | `number`       | `undefined`   | TCP connect timeout in milliseconds |
 
 ### Query a specific server
 

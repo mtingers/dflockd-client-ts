@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.9.0
+
+### Features
+
+- Add `connectTimeoutMs` option to `DistributedLock`, `DistributedSemaphore`, and `stats()` for TCP connect timeout control
+- Add `socketTimeoutMs` option to `DistributedLock` and `DistributedSemaphore` for socket idle timeout detection
+- Extracted shared `DistributedPrimitive` base class for `DistributedLock` and `DistributedSemaphore`
+
+### Bug fixes
+
+- Fix `release()` race condition: capture socket and token before awaiting in-flight renew, preventing a concurrent `close()` from nulling them
+- Fix renew failure leaving the connection open and the instance in a dirty state; `onLockLost` now automatically closes the connection so the instance can be re-acquired without `{ force: true }`
+- Fix socket leak in `connect()` when the auth handshake throws (socket is now destroyed before re-throwing)
+- Fix socket leak in TLS listener path: remove temporary `error` and connect listeners after settling
+- Fix renew loop race: save the token before the async renew call, preventing `close()` from clearing it mid-flight
+- Fix NUL byte injection: validate keys and tokens against `\0` characters in all protocol functions and constructors
+- Fix `parseLease` accepting garbage strings (e.g. `"abc"`, `"NaN"`); now requires `Number.isFinite` and falls back to default
+- Fix `renewRatio` accepting `NaN` and `Infinity`; now validated with `Number.isFinite`
+- Fix `release()` silently succeeding after `close()` — now throws `LockError`
+- Fix `wait()` error message after `close()` (was "not connected", now "connection closed; call enqueue() again")
+- Fix `enqueue()` not suspending socket idle timeout during the blocking server call
+- Fix connect listener leaks: remove the opposing listener (`error`/`connect`) after one fires
+- Fix `close()` to be synchronous (was unnecessarily `async`)
+- Add `readline` max line length guard (1 MB) to prevent unbounded memory growth
+- All protocol functions (`acquire`, `renew`, `release`, `enqueue`, `waitForLock`, `semAcquire`, `semRenew`, `semRelease`, `semEnqueue`, `semWaitForLock`) now validate inputs and throw `LockError` on invalid keys, tokens, timeouts, or limits
+- Constructor now validates `acquireTimeoutS`, `leaseTtlS`, and `renewRatio` with `Number.isFinite` checks to reject `NaN` and `Infinity`
+- Sharding strategy return value is validated for bounds, integrality, and `NaN`
+
 ## 1.8.3
 
 ### Improvements

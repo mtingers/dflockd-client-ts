@@ -877,8 +877,13 @@ abstract class DistributedPrimitive {
       this.stopRenew();
       // Wait for any in-flight renew to finish before sending the release
       // command — concurrent reads/writes on the same socket are unsafe.
+      // Bound the wait to 5s so release() doesn't hang forever when the
+      // network is unresponsive and no socketTimeoutMs is configured.
       if (this.renewInFlight) {
-        await this.renewInFlight;
+        await Promise.race([
+          this.renewInFlight,
+          new Promise<void>((r) => setTimeout(r, 5000)),
+        ]);
         // The loop resumes before us (it registered its .then first) and may
         // have scheduled a new timer.  Clear it so it cannot fire during
         // doRelease below.
@@ -918,11 +923,11 @@ abstract class DistributedPrimitive {
       this.suspendSocketTimeout(this.sock);
       const result = await this.doEnqueue(this.sock);
       if (result.status === "acquired") {
-        this.restoreSocketTimeout(this.sock);
         this.token = result.token;
         this.lease = result.lease ?? 0;
         this.startRenew();
       }
+      this.restoreSocketTimeout(this.sock);
       return result.status;
     } catch (err) {
       this.close();
@@ -1017,7 +1022,12 @@ abstract class DistributedPrimitive {
       const start = Date.now();
       const p = (async () => {
         try {
-          this.lease = await this.doRenew(sock, savedToken);
+          const newLease = await this.doRenew(sock, savedToken);
+          // Guard: if close() ran while the renew was in-flight, don't
+          // clobber the reset state (lease=0, token=null).
+          if (this.token === savedToken && !this.closed) {
+            this.lease = newLease;
+          }
         } catch {
           // Only signal lock-lost if we still own this token (close() may have cleared it)
           if (this.token === savedToken) {

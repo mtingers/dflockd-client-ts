@@ -318,48 +318,55 @@ export interface Stats {
 }
 
 // ---------------------------------------------------------------------------
-// Protocol functions
+// Protocol helpers (shared by lock and semaphore functions)
 // ---------------------------------------------------------------------------
 
-export async function acquire(
+async function protoAcquire(
   sock: net.Socket,
+  cmd: string,
+  label: string,
   key: string,
   acquireTimeoutS: number,
   leaseTtlS?: number,
+  limit?: number,
 ): Promise<{ token: string; lease: number }> {
   validateKey(key);
   if (!Number.isFinite(acquireTimeoutS) || acquireTimeoutS < 0) {
     throw new LockError("acquireTimeoutS must be a finite number >= 0");
   }
+  if (limit != null && (!Number.isInteger(limit) || limit < 1)) {
+    throw new LockError("limit must be an integer >= 1");
+  }
   if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
     throw new LockError("leaseTtlS must be a finite number > 0");
   }
-  const arg =
-    leaseTtlS == null
-      ? String(acquireTimeoutS)
-      : `${acquireTimeoutS} ${leaseTtlS}`;
 
-  await writeAll(sock, encodeLines("l", key, arg));
+  const parts: (string | number)[] = [acquireTimeoutS];
+  if (limit != null) parts.push(limit);
+  if (leaseTtlS != null) parts.push(leaseTtlS);
+
+  await writeAll(sock, encodeLines(cmd, key, parts.join(" ")));
 
   const resp = await readline(sock);
   if (resp === "timeout") {
     throw new AcquireTimeoutError(key);
   }
   if (!resp.startsWith("ok ")) {
-    throw new LockError(`acquire failed: '${resp}'`);
+    throw new LockError(`${label} failed: '${resp}'`);
   }
 
-  const parts = resp.split(" ");
-  const token = parts[1];
+  const respParts = resp.split(" ");
+  const token = respParts[1];
   if (!token) {
-    throw new LockError(`acquire: server returned no token: '${resp}'`);
+    throw new LockError(`${label}: server returned no token: '${resp}'`);
   }
-  const lease = parseLease(parts[2]);
-  return { token, lease };
+  return { token, lease: parseLease(respParts[2]) };
 }
 
-export async function renew(
+async function protoRenew(
   sock: net.Socket,
+  cmd: string,
+  label: string,
   key: string,
   token: string,
   leaseTtlS?: number,
@@ -369,53 +376,61 @@ export async function renew(
   if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
     throw new LockError("leaseTtlS must be a finite number > 0");
   }
+
   const arg = leaseTtlS == null ? token : `${token} ${leaseTtlS}`;
-  await writeAll(sock, encodeLines("n", key, arg));
+  await writeAll(sock, encodeLines(cmd, key, arg));
 
   const resp = await readline(sock);
   if (resp !== "ok" && !resp.startsWith("ok ")) {
-    throw new LockError(`renew failed: '${resp}'`);
+    throw new LockError(`${label} failed: '${resp}'`);
   }
 
   // Bare "ok" — server confirmed renewal but didn't echo the lease.
-  if (resp === "ok") {
-    return leaseTtlS ?? 30;
-  }
-
+  if (resp === "ok") return leaseTtlS ?? 30;
   return parseLease(resp.split(" ")[1]);
 }
 
-export async function enqueue(
+async function protoEnqueue(
   sock: net.Socket,
+  cmd: string,
+  label: string,
   key: string,
   leaseTtlS?: number,
+  limit?: number,
 ): Promise<{ status: "acquired" | "queued"; token: string | null; lease: number | null }> {
   validateKey(key);
+  if (limit != null && (!Number.isInteger(limit) || limit < 1)) {
+    throw new LockError("limit must be an integer >= 1");
+  }
   if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
     throw new LockError("leaseTtlS must be a finite number > 0");
   }
-  // Lease TTL is optional for enqueue; empty arg means "use server default".
-  const arg = leaseTtlS == null ? "" : String(leaseTtlS);
-  await writeAll(sock, encodeLines("e", key, arg));
+
+  const parts: (string | number)[] = [];
+  if (limit != null) parts.push(limit);
+  if (leaseTtlS != null) parts.push(leaseTtlS);
+
+  await writeAll(sock, encodeLines(cmd, key, parts.join(" ")));
 
   const resp = await readline(sock);
   if (resp.startsWith("acquired ")) {
-    const parts = resp.split(" ");
-    const token = parts[1];
+    const respParts = resp.split(" ");
+    const token = respParts[1];
     if (!token) {
-      throw new LockError(`enqueue: server returned no token: '${resp}'`);
+      throw new LockError(`${label}: server returned no token: '${resp}'`);
     }
-    const lease = parseLease(parts[2]);
-    return { status: "acquired", token, lease };
+    return { status: "acquired", token, lease: parseLease(respParts[2]) };
   }
   if (resp === "queued") {
     return { status: "queued", token: null, lease: null };
   }
-  throw new LockError(`enqueue failed: '${resp}'`);
+  throw new LockError(`${label} failed: '${resp}'`);
 }
 
-export async function waitForLock(
+async function protoWait(
   sock: net.Socket,
+  cmd: string,
+  label: string,
   key: string,
   waitTimeoutS: number,
 ): Promise<{ token: string; lease: number }> {
@@ -423,38 +438,74 @@ export async function waitForLock(
   if (!Number.isFinite(waitTimeoutS) || waitTimeoutS < 0) {
     throw new LockError("waitTimeoutS must be a finite number >= 0");
   }
-  await writeAll(sock, encodeLines("w", key, String(waitTimeoutS)));
+
+  await writeAll(sock, encodeLines(cmd, key, String(waitTimeoutS)));
 
   const resp = await readline(sock);
   if (resp === "timeout") {
     throw new AcquireTimeoutError(key);
   }
   if (!resp.startsWith("ok ")) {
-    throw new LockError(`wait failed: '${resp}'`);
+    throw new LockError(`${label} failed: '${resp}'`);
   }
 
-  const parts = resp.split(" ");
-  const token = parts[1];
+  const respParts = resp.split(" ");
+  const token = respParts[1];
   if (!token) {
-    throw new LockError(`wait: server returned no token: '${resp}'`);
+    throw new LockError(`${label}: server returned no token: '${resp}'`);
   }
-  const lease = parseLease(parts[2]);
-  return { token, lease };
+  return { token, lease: parseLease(respParts[2]) };
 }
 
-export async function release(
+async function protoRelease(
   sock: net.Socket,
+  cmd: string,
+  label: string,
   key: string,
   token: string,
 ): Promise<void> {
   validateKey(key);
   validateToken(token);
-  await writeAll(sock, encodeLines("r", key, token));
+  await writeAll(sock, encodeLines(cmd, key, token));
 
   const resp = await readline(sock);
   if (resp !== "ok") {
-    throw new LockError(`release failed: '${resp}'`);
+    throw new LockError(`${label} failed: '${resp}'`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Lock protocol functions
+// ---------------------------------------------------------------------------
+
+export async function acquire(
+  sock: net.Socket, key: string, acquireTimeoutS: number, leaseTtlS?: number,
+): Promise<{ token: string; lease: number }> {
+  return protoAcquire(sock, "l", "acquire", key, acquireTimeoutS, leaseTtlS);
+}
+
+export async function renew(
+  sock: net.Socket, key: string, token: string, leaseTtlS?: number,
+): Promise<number> {
+  return protoRenew(sock, "n", "renew", key, token, leaseTtlS);
+}
+
+export async function enqueue(
+  sock: net.Socket, key: string, leaseTtlS?: number,
+): Promise<{ status: "acquired" | "queued"; token: string | null; lease: number | null }> {
+  return protoEnqueue(sock, "e", "enqueue", key, leaseTtlS);
+}
+
+export async function waitForLock(
+  sock: net.Socket, key: string, waitTimeoutS: number,
+): Promise<{ token: string; lease: number }> {
+  return protoWait(sock, "w", "wait", key, waitTimeoutS);
+}
+
+export async function release(
+  sock: net.Socket, key: string, token: string,
+): Promise<void> {
+  return protoRelease(sock, "r", "release", key, token);
 }
 
 // ---------------------------------------------------------------------------
@@ -462,146 +513,33 @@ export async function release(
 // ---------------------------------------------------------------------------
 
 export async function semAcquire(
-  sock: net.Socket,
-  key: string,
-  acquireTimeoutS: number,
-  limit: number,
-  leaseTtlS?: number,
+  sock: net.Socket, key: string, acquireTimeoutS: number, limit: number, leaseTtlS?: number,
 ): Promise<{ token: string; lease: number }> {
-  validateKey(key);
-  if (!Number.isFinite(acquireTimeoutS) || acquireTimeoutS < 0) {
-    throw new LockError("acquireTimeoutS must be a finite number >= 0");
-  }
-  if (!Number.isInteger(limit) || limit < 1) {
-    throw new LockError("limit must be an integer >= 1");
-  }
-  if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
-    throw new LockError("leaseTtlS must be a finite number > 0");
-  }
-  const arg =
-    leaseTtlS == null
-      ? `${acquireTimeoutS} ${limit}`
-      : `${acquireTimeoutS} ${limit} ${leaseTtlS}`;
-
-  await writeAll(sock, encodeLines("sl", key, arg));
-
-  const resp = await readline(sock);
-  if (resp === "timeout") {
-    throw new AcquireTimeoutError(key);
-  }
-  if (!resp.startsWith("ok ")) {
-    throw new LockError(`sem_acquire failed: '${resp}'`);
-  }
-
-  const parts = resp.split(" ");
-  const token = parts[1];
-  if (!token) {
-    throw new LockError(`sem_acquire: server returned no token: '${resp}'`);
-  }
-  const lease = parseLease(parts[2]);
-  return { token, lease };
+  return protoAcquire(sock, "sl", "sem_acquire", key, acquireTimeoutS, leaseTtlS, limit);
 }
 
 export async function semRenew(
-  sock: net.Socket,
-  key: string,
-  token: string,
-  leaseTtlS?: number,
+  sock: net.Socket, key: string, token: string, leaseTtlS?: number,
 ): Promise<number> {
-  validateKey(key);
-  validateToken(token);
-  if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
-    throw new LockError("leaseTtlS must be a finite number > 0");
-  }
-  const arg = leaseTtlS == null ? token : `${token} ${leaseTtlS}`;
-  await writeAll(sock, encodeLines("sn", key, arg));
-
-  const resp = await readline(sock);
-  if (resp !== "ok" && !resp.startsWith("ok ")) {
-    throw new LockError(`sem_renew failed: '${resp}'`);
-  }
-
-  // Bare "ok" — server confirmed renewal but didn't echo the lease.
-  if (resp === "ok") {
-    return leaseTtlS ?? 30;
-  }
-
-  return parseLease(resp.split(" ")[1]);
+  return protoRenew(sock, "sn", "sem_renew", key, token, leaseTtlS);
 }
 
 export async function semEnqueue(
-  sock: net.Socket,
-  key: string,
-  limit: number,
-  leaseTtlS?: number,
+  sock: net.Socket, key: string, limit: number, leaseTtlS?: number,
 ): Promise<{ status: "acquired" | "queued"; token: string | null; lease: number | null }> {
-  validateKey(key);
-  if (!Number.isInteger(limit) || limit < 1) {
-    throw new LockError("limit must be an integer >= 1");
-  }
-  if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
-    throw new LockError("leaseTtlS must be a finite number > 0");
-  }
-  const arg = leaseTtlS == null ? String(limit) : `${limit} ${leaseTtlS}`;
-  await writeAll(sock, encodeLines("se", key, arg));
-
-  const resp = await readline(sock);
-  if (resp.startsWith("acquired ")) {
-    const parts = resp.split(" ");
-    const token = parts[1];
-    if (!token) {
-      throw new LockError(`sem_enqueue: server returned no token: '${resp}'`);
-    }
-    const lease = parseLease(parts[2]);
-    return { status: "acquired", token, lease };
-  }
-  if (resp === "queued") {
-    return { status: "queued", token: null, lease: null };
-  }
-  throw new LockError(`sem_enqueue failed: '${resp}'`);
+  return protoEnqueue(sock, "se", "sem_enqueue", key, leaseTtlS, limit);
 }
 
 export async function semWaitForLock(
-  sock: net.Socket,
-  key: string,
-  waitTimeoutS: number,
+  sock: net.Socket, key: string, waitTimeoutS: number,
 ): Promise<{ token: string; lease: number }> {
-  validateKey(key);
-  if (!Number.isFinite(waitTimeoutS) || waitTimeoutS < 0) {
-    throw new LockError("waitTimeoutS must be a finite number >= 0");
-  }
-  await writeAll(sock, encodeLines("sw", key, String(waitTimeoutS)));
-
-  const resp = await readline(sock);
-  if (resp === "timeout") {
-    throw new AcquireTimeoutError(key);
-  }
-  if (!resp.startsWith("ok ")) {
-    throw new LockError(`sem_wait failed: '${resp}'`);
-  }
-
-  const parts = resp.split(" ");
-  const token = parts[1];
-  if (!token) {
-    throw new LockError(`sem_wait: server returned no token: '${resp}'`);
-  }
-  const lease = parseLease(parts[2]);
-  return { token, lease };
+  return protoWait(sock, "sw", "sem_wait", key, waitTimeoutS);
 }
 
 export async function semRelease(
-  sock: net.Socket,
-  key: string,
-  token: string,
+  sock: net.Socket, key: string, token: string,
 ): Promise<void> {
-  validateKey(key);
-  validateToken(token);
-  await writeAll(sock, encodeLines("sr", key, token));
-
-  const resp = await readline(sock);
-  if (resp !== "ok") {
-    throw new LockError(`sem_release failed: '${resp}'`);
-  }
+  return protoRelease(sock, "sr", "sem_release", key, token);
 }
 
 // ---------------------------------------------------------------------------

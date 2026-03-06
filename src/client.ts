@@ -339,14 +339,14 @@ async function protoAcquire(
   limit?: number,
 ): Promise<{ token: string; lease: number }> {
   validateKey(key);
-  if (!Number.isFinite(acquireTimeoutS) || acquireTimeoutS < 0) {
-    throw new LockError("acquireTimeoutS must be a finite number >= 0");
+  if (!Number.isInteger(acquireTimeoutS) || acquireTimeoutS < 0) {
+    throw new LockError("acquireTimeoutS must be an integer >= 0");
   }
   if (limit != null && (!Number.isInteger(limit) || limit < 1)) {
     throw new LockError("limit must be an integer >= 1");
   }
-  if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
-    throw new LockError("leaseTtlS must be a finite number > 0");
+  if (leaseTtlS != null && (!Number.isInteger(leaseTtlS) || leaseTtlS < 1)) {
+    throw new LockError("leaseTtlS must be an integer >= 1");
   }
 
   const parts: (string | number)[] = [acquireTimeoutS];
@@ -381,8 +381,8 @@ async function protoRenew(
 ): Promise<number> {
   validateKey(key);
   validateToken(token);
-  if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
-    throw new LockError("leaseTtlS must be a finite number > 0");
+  if (leaseTtlS != null && (!Number.isInteger(leaseTtlS) || leaseTtlS < 1)) {
+    throw new LockError("leaseTtlS must be an integer >= 1");
   }
 
   const arg = leaseTtlS == null ? token : `${token} ${leaseTtlS}`;
@@ -410,8 +410,8 @@ async function protoEnqueue(
   if (limit != null && (!Number.isInteger(limit) || limit < 1)) {
     throw new LockError("limit must be an integer >= 1");
   }
-  if (leaseTtlS != null && (!Number.isFinite(leaseTtlS) || leaseTtlS <= 0)) {
-    throw new LockError("leaseTtlS must be a finite number > 0");
+  if (leaseTtlS != null && (!Number.isInteger(leaseTtlS) || leaseTtlS < 1)) {
+    throw new LockError("leaseTtlS must be an integer >= 1");
   }
 
   const parts: (string | number)[] = [];
@@ -443,8 +443,8 @@ async function protoWait(
   waitTimeoutS: number,
 ): Promise<{ token: string; lease: number }> {
   validateKey(key);
-  if (!Number.isFinite(waitTimeoutS) || waitTimeoutS < 0) {
-    throw new LockError("waitTimeoutS must be a finite number >= 0");
+  if (!Number.isInteger(waitTimeoutS) || waitTimeoutS < 0) {
+    throw new LockError("waitTimeoutS must be an integer >= 0");
   }
 
   await writeAll(sock, encodeLines(cmd, key, String(waitTimeoutS)));
@@ -670,11 +670,11 @@ abstract class DistributedPrimitive {
     this.connectTimeoutMs = opts.connectTimeoutMs;
     this.socketTimeoutMs = opts.socketTimeoutMs;
 
-    if (!Number.isFinite(this.acquireTimeoutS) || this.acquireTimeoutS < 0) {
-      throw new LockError("acquireTimeoutS must be a finite number >= 0");
+    if (!Number.isInteger(this.acquireTimeoutS) || this.acquireTimeoutS < 0) {
+      throw new LockError("acquireTimeoutS must be an integer >= 0");
     }
-    if (this.leaseTtlS != null && (!Number.isFinite(this.leaseTtlS) || this.leaseTtlS <= 0)) {
-      throw new LockError("leaseTtlS must be a finite number > 0");
+    if (this.leaseTtlS != null && (!Number.isInteger(this.leaseTtlS) || this.leaseTtlS < 1)) {
+      throw new LockError("leaseTtlS must be an integer >= 1");
     }
 
     if (opts.servers) {
@@ -828,7 +828,7 @@ abstract class DistributedPrimitive {
       if (this.renewInFlight) {
         await Promise.race([
           this.renewInFlight,
-          new Promise<void>((r) => setTimeout(r, 5000)),
+          new Promise<void>((r) => setTimeout(r, 5000).unref()),
         ]);
         // The loop resumes before us (it registered its .then first) and may
         // have scheduled a new timer.  Clear it so it cannot fire during
@@ -871,9 +871,9 @@ abstract class DistributedPrimitive {
       if (result.status === "acquired") {
         this.token = result.token;
         this.lease = result.lease ?? 0;
+        this.restoreSocketTimeout(this.sock);
         this.startRenew();
       }
-      this.restoreSocketTimeout(this.sock);
       return result.status;
     } catch (err) {
       this.close();

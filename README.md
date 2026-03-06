@@ -103,8 +103,8 @@ without blocking. If the lock is contended, `enqueue()` returns `"queued"` and
 | Option             | Type                          | Default                  | Description                                      |
 |--------------------|-------------------------------|--------------------------|--------------------------------------------------|
 | `key`              | `string`                      | *(required)*             | Lock name                                        |
-| `acquireTimeoutS`  | `number`                      | `10`                     | Seconds to wait for the lock before giving up    |
-| `leaseTtlS`        | `number`                      | server default           | Server-side lease duration in seconds             |
+| `acquireTimeoutS`  | `number`                      | `10`                     | Seconds to wait for the lock before giving up (integer ≥ 0) |
+| `leaseTtlS`        | `number`                      | server default           | Server-side lease duration in seconds (integer ≥ 1) |
 | `servers`          | `Array<[string, number]>`     | `[["127.0.0.1", 6388]]` | List of `[host, port]` pairs                     |
 | `shardingStrategy` | `ShardingStrategy`            | `stableHashShard`        | Function mapping `(key, numServers)` to a server index |
 | `host`             | `string`                      | `127.0.0.1`              | Server host *(deprecated — use `servers`)*       |
@@ -233,9 +233,9 @@ try {
 | Option             | Type                          | Default                  | Description                                      |
 |--------------------|-------------------------------|--------------------------|--------------------------------------------------|
 | `key`              | `string`                      | *(required)*             | Semaphore name                                   |
-| `limit`            | `number`                      | *(required)*             | Max concurrent holders                           |
-| `acquireTimeoutS`  | `number`                      | `10`                     | Seconds to wait before giving up                 |
-| `leaseTtlS`        | `number`                      | server default           | Server-side lease duration in seconds             |
+| `limit`            | `number`                      | *(required)*             | Max concurrent holders (integer ≥ 1)             |
+| `acquireTimeoutS`  | `number`                      | `10`                     | Seconds to wait before giving up (integer ≥ 0)   |
+| `leaseTtlS`        | `number`                      | server default           | Server-side lease duration in seconds (integer ≥ 1) |
 | `servers`          | `Array<[string, number]>`     | `[["127.0.0.1", 6388]]` | List of `[host, port]` pairs                     |
 | `shardingStrategy` | `ShardingStrategy`            | `stableHashShard`        | Function mapping `(key, numServers)` to a server index |
 | `host`             | `string`                      | `127.0.0.1`              | Server host *(deprecated — use `servers`)*       |

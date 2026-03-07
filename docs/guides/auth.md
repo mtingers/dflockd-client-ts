@@ -37,6 +37,16 @@ const s = await stats({
 });
 ```
 
+## Signals with auth
+
+```ts
+import { SignalConnection } from "dflockd-client";
+
+const conn = await SignalConnection.connect({
+  auth: "my-secret-token",
+});
+```
+
 ## Error handling
 
 If authentication fails, an `AuthError` (a subclass of `LockError`) is thrown:

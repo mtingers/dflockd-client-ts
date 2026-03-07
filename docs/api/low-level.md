@@ -100,6 +100,24 @@ if (result.status === "queued") {
 
 Two-phase step 2 for semaphores. Returns `{ token, lease }`. Throws `AcquireTimeoutError` on timeout.
 
+## Signal functions
+
+### `publish(sock, channel, payload)`
+
+Publish a signal on a channel using a regular socket (request-response). Returns the number of listeners that received the signal.
+
+Use this when you only need to publish and don't need to subscribe. For subscribing to signals, use [`SignalConnection`](signals.md).
+
+```ts
+import * as net from "net";
+import { publish } from "dflockd-client";
+
+const sock = net.createConnection({ host: "127.0.0.1", port: 6388 });
+const delivered = await publish(sock, "events.user.created", "user-123");
+console.log(`delivered to ${delivered} listeners`);
+sock.destroy();
+```
+
 ## Full example
 
 ```ts
@@ -107,6 +125,7 @@ import * as net from "net";
 import {
   acquire, enqueue, waitForLock, renew, release,
   semAcquire, semEnqueue, semWaitForLock, semRenew, semRelease,
+  publish,
 } from "dflockd-client";
 
 const sock = net.createConnection({ host: "127.0.0.1", port: 6388 });
@@ -132,6 +151,10 @@ const semResult = await semEnqueue(sock, "sem-key", 5);
 if (semResult.status === "queued") {
   const semGranted = await semWaitForLock(sock, "sem-key", 10);
 }
+
+// Signal — publish on a channel
+const delivered = await publish(sock, "events.deploy", "v1.10.0");
+console.log(`signal delivered to ${delivered} listeners`);
 
 sock.destroy();
 ```

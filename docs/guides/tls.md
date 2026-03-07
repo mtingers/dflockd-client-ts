@@ -45,6 +45,16 @@ import { stats } from "dflockd-client";
 const s = await stats({ host: "10.0.0.1", port: 6388, tls: {} });
 ```
 
+## Signals over TLS
+
+```ts
+import { SignalConnection } from "dflockd-client";
+
+const conn = await SignalConnection.connect({
+  tls: {},
+});
+```
+
 ## Combined with authentication
 
 ```ts

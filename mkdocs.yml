@@ -60,6 +60,7 @@ nav:
   - API Reference:
     - DistributedLock: api/lock.md
     - DistributedSemaphore: api/semaphore.md
+    - Signals (Pub/Sub): api/signals.md
     - Low-level Functions: api/low-level.md
     - Stats: api/stats.md
     - Error Handling: api/errors.md

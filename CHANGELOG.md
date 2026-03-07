@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.10.1] - 2026-03-07
+
+### Added
+
+- Documentation for signal pub/sub: `SignalConnection` API reference, examples, and guide sections for TLS and auth
+- Organized examples page into clear sections (Locks, Semaphores, Signals, Configuration, Error handling)
+- Added `publish()` low-level function to low-level docs and full example
+- Added signal pub/sub to home page feature list
+
 ## [v1.10.0] - 2026-03-07
 
 ### Added

@@ -1,6 +1,8 @@
 # Examples
 
-## Basic lock and release
+## Locks
+
+### Basic lock and release
 
 ```ts
 import { DistributedLock } from "dflockd-client";
@@ -20,7 +22,7 @@ console.log(`acquired key=${lock.key} token=${lock.token} lease=${lock.lease}`);
 await lock.release();
 ```
 
-## `withLock` helper
+### `withLock` helper
 
 ```ts
 const lock = new DistributedLock({
@@ -36,7 +38,7 @@ await lock.withLock(async () => {
 // lock released automatically
 ```
 
-## FIFO ordering — concurrent workers
+### FIFO ordering — concurrent workers
 
 Multiple workers competing for the same lock are granted access in FIFO order:
 
@@ -58,7 +60,7 @@ async function worker(id: number): Promise<void> {
 await Promise.all(Array.from({ length: 5 }, (_, i) => worker(i)));
 ```
 
-## Two-phase locking (enqueue / wait)
+### Two-phase locking (enqueue / wait)
 
 Split acquisition into two steps to notify an external system between joining the queue and blocking:
 
@@ -90,7 +92,9 @@ try {
 }
 ```
 
-## Semaphore — concurrent access
+## Semaphores
+
+### Concurrent access
 
 Allow up to N concurrent holders per key:
 
@@ -105,7 +109,9 @@ await sem.withLock(async () => {
 });
 ```
 
-## Multi-server sharding
+## Configuration
+
+### Multi-server sharding
 
 Distribute locks across multiple dflockd instances:
 
@@ -124,7 +130,7 @@ await lock.withLock(async () => {
 });
 ```
 
-## TLS
+### TLS
 
 ```ts
 const lock = new DistributedLock({
@@ -140,13 +146,50 @@ const lock2 = new DistributedLock({
 });
 ```
 
-## Authentication
+### Authentication
 
 ```ts
 const lock = new DistributedLock({
   key: "my-resource",
   auth: "my-secret-token",
 });
+```
+
+## Signals
+
+### Pub/sub with pattern matching
+
+Publish and subscribe to signals with pattern matching:
+
+```ts
+import { SignalConnection } from "dflockd-client";
+
+const conn = await SignalConnection.connect();
+
+// Subscribe to all events under "events.>"
+await conn.listen("events.>");
+
+conn.onSignal((sig) => {
+  console.log(`${sig.channel}: ${sig.payload}`);
+});
+
+// Publish a signal
+await conn.emit("events.user.created", "user-123");
+```
+
+### Queue groups
+
+Distribute signals across workers so each signal is handled by exactly one member:
+
+```ts
+import { SignalConnection } from "dflockd-client";
+
+const worker = await SignalConnection.connect();
+await worker.listen("tasks.>", "my-worker-group");
+
+for await (const sig of worker) {
+  console.log(`processing ${sig.payload}`);
+}
 ```
 
 ## Error handling

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.10.2] - 2026-03-07
+
+### Changed
+
+- Simplified and deduplicated documentation: merged installation + quickstart into single getting started page, merged TLS + auth guides into single security guide, trimmed README to essentials with link to docs site
+- Reduced docs from 13 pages to 9 pages with no information loss
+
 ## [v1.10.1] - 2026-03-07
 
 ### Added

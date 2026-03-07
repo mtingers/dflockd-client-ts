@@ -4,14 +4,12 @@ TypeScript client for the [dflockd](https://github.com/mtingers/dflockd) distrib
 
 ## Features
 
-- **`withLock` helper** — acquire, run callback, release automatically (even on errors)
-- **Two-phase locking** — split enqueue and wait to notify external systems between queue join and blocking
-- **Automatic lease renewal** — background renewal keeps locks alive while your code runs
-- **Distributed semaphores** — allow up to N concurrent holders per key
-- **Signal pub/sub** — publish and subscribe to signals with NATS-style pattern matching and queue groups
-- **Multi-server sharding** — CRC32-based consistent hashing across multiple dflockd instances
-- **TLS and authentication** — encrypted connections and token-based auth
-- **Low-level API** — protocol functions for fine-grained socket control
+- **Locks and semaphores** with automatic lease renewal
+- **Two-phase locking** — enqueue then wait, with hooks between steps
+- **Signal pub/sub** — NATS-style pattern matching and queue groups
+- **Multi-server sharding** — CRC32-based consistent hashing
+- **TLS and authentication** support
+- **Low-level API** for direct socket control
 
 ## Quick example
 
@@ -26,9 +24,8 @@ await lock.withLock(async () => {
 // lock is released
 ```
 
-## Getting started
+## Next steps
 
-- [Installation](getting-started/installation.md) — install via npm
-- [Quick Start](getting-started/quickstart.md) — acquire your first lock in under a minute
-- [Examples](getting-started/examples.md) — common usage patterns
-- [API Reference](api/lock.md) — full `DistributedLock`, `DistributedSemaphore`, and `SignalConnection` API
+- [Getting Started](getting-started/index.md) — install and acquire your first lock
+- [API Reference](api/lock.md) — `DistributedLock`, `DistributedSemaphore`, `SignalConnection`
+- [Guides](guides/security.md) — TLS, authentication, sharding

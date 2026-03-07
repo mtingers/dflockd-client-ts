@@ -53,10 +53,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Getting Started:
-    - Installation: getting-started/installation.md
-    - Quick Start: getting-started/quickstart.md
-    - Examples: getting-started/examples.md
+  - Getting Started: getting-started/index.md
   - API Reference:
     - DistributedLock: api/lock.md
     - DistributedSemaphore: api/semaphore.md
@@ -65,8 +62,7 @@ nav:
     - Stats: api/stats.md
     - Error Handling: api/errors.md
   - Guides:
-    - TLS: guides/tls.md
-    - Authentication: guides/auth.md
+    - TLS & Authentication: guides/security.md
     - Sharding: guides/sharding.md
   - Changelog: changelog.md
 

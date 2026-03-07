@@ -102,3 +102,25 @@ Close the underlying socket without sending a release command. The server will a
 | `key`    | `string`          | The lock key name                        |
 | `token`  | `string \| null`  | The current lock token, or `null`        |
 | `lease`  | `number`          | The lease TTL in seconds from last acquire |
+
+## FIFO ordering
+
+Multiple workers competing for the same lock are granted access in FIFO order:
+
+```ts
+async function worker(id: number): Promise<void> {
+  const lock = new DistributedLock({
+    key: "shared-key",
+    acquireTimeoutS: 30,
+  });
+
+  await lock.withLock(async () => {
+    console.log(`worker ${id}: acquired`);
+    await new Promise((r) => setTimeout(r, 100));
+    console.log(`worker ${id}: releasing`);
+  });
+}
+
+// Launch 5 workers — they acquire the lock in order
+await Promise.all(Array.from({ length: 5 }, (_, i) => worker(i)));
+```

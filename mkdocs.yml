@@ -1,6 +1,6 @@
 site_name: dflockd-client (TypeScript)
 site_url: https://mtingers.github.io/dflockd-client-ts/
-site_description: TypeScript client for the dflockd distributed lock daemon — high-level lock and semaphore types with automatic lease renewal, sharding, TLS, and authentication.
+site_description: A TypeScript client for the dflockd
 repo_url: https://github.com/mtingers/dflockd-client-ts
 repo_name: mtingers/dflockd-client-ts
 

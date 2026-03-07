@@ -19,7 +19,10 @@ import {
   semRelease,
   semEnqueue,
   semWaitForLock,
+  publish,
+  SignalConnection,
 } from "./client.js";
+import type { Signal } from "./client.js";
 
 // ---------------------------------------------------------------------------
 // Mock server helper — creates a TCP server that speaks the dflockd protocol
@@ -2257,5 +2260,565 @@ describe("integration: lock reuse (issue #7)", () => {
     const ok2 = await sem.acquire({ force: true });
     assert.equal(ok2, true);
     await sem.release();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Signal — publish (low-level, raw socket)
+// ---------------------------------------------------------------------------
+
+describe("publish (low-level)", () => {
+  it("sends signal command and returns delivery count", async () => {
+    const { server, port } = await createMockServer((lines, respond) => {
+      if (lines[0] === "signal") {
+        assert.equal(lines[1], "events.user.login");
+        assert.equal(lines[2], '{"user":"alice"}');
+        respond("ok 3");
+      }
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const count = await publish(sock, "events.user.login", '{"user":"alice"}');
+      assert.equal(count, 3);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("throws on empty channel", async () => {
+    const sock = new net.Socket();
+    await assert.rejects(() => publish(sock, "", "payload"), LockError);
+  });
+
+  it("throws on empty payload", async () => {
+    const sock = new net.Socket();
+    await assert.rejects(() => publish(sock, "ch", ""), LockError);
+  });
+
+  it("throws on payload with newline", async () => {
+    const sock = new net.Socket();
+    await assert.rejects(() => publish(sock, "ch", "a\nb"), LockError);
+  });
+
+  it("throws on error response", async () => {
+    const { server, port } = await createMockServer((_lines, respond) => {
+      respond("error");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      await assert.rejects(() => publish(sock, "ch", "payload"), LockError);
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SignalConnection
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a mock server for signal tests that supports:
+ * - 3-line protocol commands (listen, unlisten, signal)
+ * - Pushing async `sig` lines to connected clients
+ */
+function createSignalMockServer(): Promise<{
+  server: net.Server;
+  port: number;
+  connections: net.Socket[];
+  pushSignal: (channel: string, payload: string) => void;
+}> {
+  return new Promise((resolve) => {
+    const connections: net.Socket[] = [];
+    const server = net.createServer((conn) => {
+      connections.push(conn);
+      let buf = "";
+      const lines: string[] = [];
+      conn.on("data", (chunk) => {
+        buf += chunk.toString("utf-8");
+        let idx: number;
+        while ((idx = buf.indexOf("\n")) !== -1) {
+          lines.push(buf.slice(0, idx).replace(/\r$/, ""));
+          buf = buf.slice(idx + 1);
+          if (lines.length >= 3) {
+            const batch = lines.splice(0, 3);
+            const [cmd] = batch;
+            if (cmd === "listen" || cmd === "unlisten") {
+              conn.write("ok\n");
+            } else if (cmd === "signal") {
+              conn.write("ok 1\n");
+            } else {
+              conn.write("error\n");
+            }
+          }
+        }
+      });
+      conn.on("close", () => {
+        const idx = connections.indexOf(conn);
+        if (idx >= 0) connections.splice(idx, 1);
+      });
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address() as net.AddressInfo;
+      const pushSignal = (channel: string, payload: string) => {
+        for (const c of connections) {
+          c.write(`sig ${channel} ${payload}\n`);
+        }
+      };
+      resolve({ server, port: addr.port, connections, pushSignal });
+    });
+  });
+}
+
+describe("SignalConnection", () => {
+  it("listen sends correct wire format and resolves on ok", async () => {
+    const { server, port } = await createSignalMockServer();
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const conn = new SignalConnection(sock);
+      await conn.listen("events.>");
+      conn.close();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("listen with group sends correct wire format", async () => {
+    const receivedBatches: string[][] = [];
+    const { server, port } = await createMockServer((lines, respond) => {
+      receivedBatches.push([...lines]);
+      respond("ok");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const conn = new SignalConnection(sock);
+      await conn.listen("events.>", "workers");
+      assert.equal(receivedBatches.length, 1);
+      assert.deepEqual(receivedBatches[0], ["listen", "events.>", "workers"]);
+      conn.close();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("unlisten sends correct wire format", async () => {
+    const receivedBatches: string[][] = [];
+    const { server, port } = await createMockServer((lines, respond) => {
+      receivedBatches.push([...lines]);
+      respond("ok");
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const conn = new SignalConnection(sock);
+      await conn.unlisten("events.>");
+      assert.equal(receivedBatches.length, 1);
+      assert.deepEqual(receivedBatches[0], ["unlisten", "events.>", ""]);
+      conn.close();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("emit sends signal command and returns delivery count", async () => {
+    const { server, port } = await createSignalMockServer();
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const conn = new SignalConnection(sock);
+      const count = await conn.emit("events.user.login", '{"user":"alice"}');
+      assert.equal(count, 1);
+      conn.close();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("receives pushed signals via onSignal", async () => {
+    const { server, port, pushSignal } = await createSignalMockServer();
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const conn = new SignalConnection(sock);
+
+      const received: Signal[] = [];
+      conn.onSignal((sig) => received.push(sig));
+
+      await conn.listen("events.>");
+
+      // Small delay to ensure connection is fully set up on server side
+      await new Promise((r) => setTimeout(r, 20));
+      pushSignal("events.user.login", '{"user":"alice"}');
+
+      // Wait for the signal to arrive
+      await new Promise((r) => setTimeout(r, 50));
+
+      assert.equal(received.length, 1);
+      assert.equal(received[0].channel, "events.user.login");
+      assert.equal(received[0].payload, '{"user":"alice"}');
+      conn.close();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("receives signals with spaces in payload", async () => {
+    const { server, port, pushSignal } = await createSignalMockServer();
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const conn = new SignalConnection(sock);
+
+      const received: Signal[] = [];
+      conn.onSignal((sig) => received.push(sig));
+      await conn.listen("ch");
+
+      await new Promise((r) => setTimeout(r, 20));
+      pushSignal("ch", "hello world with spaces");
+      await new Promise((r) => setTimeout(r, 50));
+
+      assert.equal(received.length, 1);
+      assert.equal(received[0].channel, "ch");
+      assert.equal(received[0].payload, "hello world with spaces");
+      conn.close();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("offSignal removes a listener", async () => {
+    const { server, port, pushSignal } = await createSignalMockServer();
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const conn = new SignalConnection(sock);
+
+      const received: Signal[] = [];
+      const listener = (sig: Signal) => received.push(sig);
+      conn.onSignal(listener);
+      await conn.listen("ch");
+
+      await new Promise((r) => setTimeout(r, 20));
+      pushSignal("ch", "first");
+      await new Promise((r) => setTimeout(r, 50));
+
+      conn.offSignal(listener);
+      pushSignal("ch", "second");
+      await new Promise((r) => setTimeout(r, 50));
+
+      assert.equal(received.length, 1);
+      assert.equal(received[0].payload, "first");
+      conn.close();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("async iterator yields signals and stops on close", async () => {
+    const { server, port, pushSignal } = await createSignalMockServer();
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const conn = new SignalConnection(sock);
+      await conn.listen("ch");
+
+      await new Promise((r) => setTimeout(r, 20));
+      pushSignal("ch", "one");
+      pushSignal("ch", "two");
+
+      // Close after a short delay to end the iterator
+      setTimeout(() => conn.close(), 100);
+
+      const received: Signal[] = [];
+      for await (const sig of conn) {
+        received.push(sig);
+      }
+
+      assert.ok(received.length >= 2, `expected >=2 signals, got ${received.length}`);
+      assert.equal(received[0].payload, "one");
+      assert.equal(received[1].payload, "two");
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("close() rejects pending command", async () => {
+    // Create a server that never responds
+    const serverConns: net.Socket[] = [];
+    const { server, port } = await new Promise<{ server: net.Server; port: number }>((resolve) => {
+      const srv = net.createServer((conn) => {
+        serverConns.push(conn);
+        // Don't respond to anything
+      });
+      srv.listen(0, "127.0.0.1", () => {
+        const addr = srv.address() as net.AddressInfo;
+        resolve({ server: srv, port: addr.port });
+      });
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const conn = new SignalConnection(sock);
+
+      const listenPromise = conn.listen("ch");
+      // Close while listen is pending
+      setTimeout(() => conn.close(), 20);
+
+      await assert.rejects(listenPromise, LockError);
+    } finally {
+      for (const c of serverConns) c.destroy();
+      await closeMockServer(server);
+    }
+  });
+
+  it("serializes concurrent commands", async () => {
+    const receivedBatches: string[][] = [];
+    const { server, port } = await createMockServer((lines, respond) => {
+      receivedBatches.push([...lines]);
+      // Delay response slightly to test queuing
+      setTimeout(() => respond("ok"), 10);
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const conn = new SignalConnection(sock);
+
+      // Fire multiple commands without awaiting
+      const p1 = conn.listen("ch1");
+      const p2 = conn.listen("ch2");
+      const p3 = conn.listen("ch3");
+
+      await Promise.all([p1, p2, p3]);
+
+      // All three commands should have been sent and received in order
+      assert.equal(receivedBatches.length, 3);
+      assert.equal(receivedBatches[0][1], "ch1");
+      assert.equal(receivedBatches[1][1], "ch2");
+      assert.equal(receivedBatches[2][1], "ch3");
+      conn.close();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("isClosed returns true after close()", async () => {
+    const { server, port } = await createSignalMockServer();
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const conn = new SignalConnection(sock);
+      assert.equal(conn.isClosed, false);
+      conn.close();
+      assert.equal(conn.isClosed, true);
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("throws on listen with empty pattern", async () => {
+    const sock = new net.Socket();
+    const conn = new SignalConnection(sock);
+    await assert.rejects(() => conn.listen(""), LockError);
+    conn.close();
+  });
+
+  it("throws on emit with empty payload", async () => {
+    const sock = new net.Socket();
+    const conn = new SignalConnection(sock);
+    await assert.rejects(() => conn.emit("ch", ""), LockError);
+    conn.close();
+  });
+
+  it("throws on group with newline", async () => {
+    const sock = new net.Socket();
+    const conn = new SignalConnection(sock);
+    await assert.rejects(() => conn.listen("ch", "bad\ngroup"), LockError);
+    conn.close();
+  });
+
+  it("connect() factory creates a working connection", async () => {
+    const { server, port } = await createSignalMockServer();
+    try {
+      const conn = await SignalConnection.connect({ host: "127.0.0.1", port });
+      await conn.listen("ch");
+      conn.close();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("handles interleaved signals and command responses", async () => {
+    // Custom server that pushes a signal between receiving the listen command
+    // and the emit command
+    const { server, port } = await new Promise<{ server: net.Server; port: number }>((resolve) => {
+      const srv = net.createServer((conn) => {
+        let buf = "";
+        const lines: string[] = [];
+        conn.on("data", (chunk) => {
+          buf += chunk.toString("utf-8");
+          let idx: number;
+          while ((idx = buf.indexOf("\n")) !== -1) {
+            lines.push(buf.slice(0, idx).replace(/\r$/, ""));
+            buf = buf.slice(idx + 1);
+            if (lines.length >= 3) {
+              const batch = lines.splice(0, 3);
+              if (batch[0] === "listen") {
+                conn.write("ok\n");
+                // Push a signal right after listen response
+                setTimeout(() => conn.write("sig events.test hello\n"), 10);
+              } else if (batch[0] === "signal") {
+                conn.write("ok 2\n");
+              }
+            }
+          }
+        });
+      });
+      srv.listen(0, "127.0.0.1", () => {
+        const addr = srv.address() as net.AddressInfo;
+        resolve({ server: srv, port: addr.port });
+      });
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.once("connect", r));
+      const conn = new SignalConnection(sock);
+
+      const received: Signal[] = [];
+      conn.onSignal((sig) => received.push(sig));
+
+      await conn.listen("events.>");
+
+      // Wait for the pushed signal
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Now emit — should not be confused with the push message
+      const count = await conn.emit("events.other", "data");
+      assert.equal(count, 2);
+
+      assert.equal(received.length, 1);
+      assert.equal(received[0].channel, "events.test");
+      assert.equal(received[0].payload, "hello");
+
+      conn.close();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Coverage: writeAll() error path
+// ---------------------------------------------------------------------------
+
+describe("writeAll error path", () => {
+  it("rejects when socket write fails", async () => {
+    const sock = new net.Socket();
+    // Destroy the socket so write() fails
+    sock.destroy();
+    await assert.rejects(
+      () => acquire(sock, "mykey", 10),
+      Error,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Coverage: readline() on already-ended socket
+// ---------------------------------------------------------------------------
+
+describe("readline on already-ended socket", () => {
+  it("rejects immediately when socket is already destroyed", async () => {
+    const { server, port } = await createMockServer((_lines, _respond) => {
+      // Don't respond — we'll destroy the socket before reading
+    });
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      sock.destroy();
+      // readline should detect sock.destroyed and reject immediately
+      await assert.rejects(
+        () => acquire(sock, "mykey", 10),
+        Error,
+      );
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+
+  it("rejects when server ends connection after write but before response", async () => {
+    // Server accepts the write but closes before sending any response line.
+    // This exercises readline's 'end'/'close' error path.
+    const server = net.createServer((conn) => {
+      let buf = "";
+      conn.on("data", (chunk) => {
+        buf += chunk.toString("utf-8");
+        // Once we see the full 3-line command, close without responding
+        const newlines = buf.split("\n").length - 1;
+        if (newlines >= 3) {
+          conn.destroy();
+        }
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as net.AddressInfo).port;
+    try {
+      const sock = net.createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((r) => sock.on("connect", r));
+      await assert.rejects(
+        () => acquire(sock, "mykey", 10),
+        Error,
+      );
+      sock.destroy();
+    } finally {
+      await closeMockServer(server);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Coverage: socketTimeoutMs triggers timeout and destroys socket
+// ---------------------------------------------------------------------------
+
+describe("socketTimeoutMs triggers socket destruction", () => {
+  it("destroys socket after idle timeout during renew", async () => {
+    // Server responds to acquire but never responds to renew
+    let callCount = 0;
+    const { server, port } = await createMockServer((_lines, respond) => {
+      callCount++;
+      if (callCount === 1) {
+        respond("ok tok1 1");
+      }
+      // Don't respond to renew — let socket timeout fire
+    });
+    try {
+      let lostKey: string | undefined;
+      const lock = new DistributedLock({
+        key: "k",
+        host: "127.0.0.1",
+        port,
+        renewRatio: 0.01,
+        socketTimeoutMs: 500,
+        onLockLost: (k) => {
+          lostKey = k;
+        },
+      });
+      await lock.acquire();
+      assert.equal(lock.token, "tok1");
+
+      // Wait for renew to fire (~1s) and then socket timeout (500ms)
+      await new Promise((r) => setTimeout(r, 2500));
+
+      // Socket timeout should have caused lock lost
+      assert.equal(lostKey, "k");
+      assert.equal(lock.token, null);
+    } finally {
+      await closeMockServer(server);
+    }
   });
 });

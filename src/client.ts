@@ -781,8 +781,8 @@ abstract class DistributedPrimitive {
       this.close();
     }
     this.closed = false;
-    this.sock = await this.openConnection();
     try {
+      this.sock = await this.openConnection();
       // Suspend socket idle timeout during the blocking acquire — the server
       // won't send data until the lock is granted or the acquire times out.
       this.suspendSocketTimeout(this.sock);
@@ -864,8 +864,8 @@ abstract class DistributedPrimitive {
       this.close();
     }
     this.closed = false;
-    this.sock = await this.openConnection();
     try {
+      this.sock = await this.openConnection();
       this.suspendSocketTimeout(this.sock);
       const result = await this.doEnqueue(this.sock);
       if (result.status === "acquired") {
@@ -1093,5 +1093,398 @@ export class DistributedSemaphore extends DistributedPrimitive {
 
   protected doRenew(sock: net.Socket, token: string) {
     return semRenew(sock, this.key, token, this.leaseTtlS);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Signal types
+// ---------------------------------------------------------------------------
+
+export interface Signal {
+  channel: string;
+  payload: string;
+}
+
+// ---------------------------------------------------------------------------
+// Signal protocol functions
+// ---------------------------------------------------------------------------
+
+function validatePayload(payload: string): void {
+  if (payload === "") {
+    throw new LockError("payload must not be empty");
+  }
+  if (/[\0\n\r]/.test(payload)) {
+    throw new LockError(
+      "payload must not contain NUL, newline, or carriage return characters",
+    );
+  }
+}
+
+/**
+ * Publish a signal on a channel using a regular socket (request-response).
+ * Returns the number of listeners that received the signal.
+ *
+ * Use this when you only need to publish and don't need to receive signals.
+ * For subscribing to signals, use `SignalConnection`.
+ */
+export async function publish(
+  sock: net.Socket,
+  channel: string,
+  payload: string,
+): Promise<number> {
+  validateKey(channel);
+  validatePayload(payload);
+  await writeAll(sock, encodeLines("signal", channel, payload));
+  const resp = await readline(sock);
+  if (!resp.startsWith("ok ")) {
+    throw new LockError(`signal failed: '${resp}'`);
+  }
+  const n = parseInt(resp.split(" ")[1], 10);
+  if (!Number.isFinite(n)) {
+    throw new LockError(`signal: bad delivery count: '${resp}'`);
+  }
+  return n;
+}
+
+// ---------------------------------------------------------------------------
+// SignalConnection
+// ---------------------------------------------------------------------------
+
+export interface SignalConnectionOptions {
+  /** Server host (default `"127.0.0.1"`). */
+  host?: string;
+  /** Server port (default `6388`). */
+  port?: number;
+  /** TLS options; pass `{}` for default system CA. */
+  tls?: tls.ConnectionOptions;
+  /** Auth token for servers started with `--auth-token`. */
+  auth?: string;
+  /** TCP connect timeout in milliseconds. */
+  connectTimeoutMs?: number;
+}
+
+/**
+ * A connection dedicated to the signal (pub/sub) protocol.
+ *
+ * Wraps a socket with a background line reader that separates asynchronous
+ * `sig` push messages from command responses, allowing `listen`, `unlisten`,
+ * and `emit` to be called while signals are being delivered.
+ *
+ * ```ts
+ * const conn = await SignalConnection.connect();
+ * conn.onSignal((sig) => console.log(sig.channel, sig.payload));
+ * await conn.listen("events.>");
+ * ```
+ */
+export class SignalConnection {
+  private sock: net.Socket;
+  private buf = "";
+  private responseResolve: ((line: string) => void) | null = null;
+  private responseReject: ((err: Error) => void) | null = null;
+  private cmdQueue: Array<() => void> = [];
+  private cmdBusy = false;
+  private signalListeners: Array<(signal: Signal) => void> = [];
+  private _closed = false;
+
+  /**
+   * Wrap an existing socket as a SignalConnection.
+   *
+   * The socket should already be connected (and authenticated, if needed).
+   * Prefer `SignalConnection.connect()` for convenience.
+   */
+  constructor(sock: net.Socket) {
+    this.sock = sock;
+
+    // Drain any leftover buffer from the global readline WeakMap.
+    const leftover = _readlineBuf.get(sock);
+    if (leftover) {
+      this.buf = leftover;
+      _readlineBuf.delete(sock);
+    }
+
+    sock.on("data", (chunk: Buffer) => this.onData(chunk));
+    sock.on("error", (err: Error) => this.onSocketError(err));
+    sock.on("close", () => this.onSocketEnd());
+    sock.on("end", () => this.onSocketEnd());
+
+    // Process any lines already buffered.
+    this.drainLines();
+  }
+
+  /** Connect to a dflockd server and return a SignalConnection. */
+  static async connect(
+    opts?: SignalConnectionOptions,
+  ): Promise<SignalConnection> {
+    const host = opts?.host ?? DEFAULT_HOST;
+    const port = opts?.port ?? DEFAULT_PORT;
+    const sock = await connect(
+      host,
+      port,
+      opts?.tls,
+      opts?.auth,
+      opts?.connectTimeoutMs,
+    );
+    return new SignalConnection(sock);
+  }
+
+  /**
+   * Subscribe to signals matching `pattern`.
+   *
+   * Patterns support NATS-style wildcards:
+   * - `*` matches exactly one dot-separated token
+   * - `>` matches one or more trailing tokens
+   *
+   * If `group` is provided, the subscription joins a queue group where
+   * signals are load-balanced (round-robin) among group members.
+   */
+  async listen(pattern: string, group?: string): Promise<void> {
+    validateKey(pattern);
+    if (group != null && /[\0\n\r]/.test(group)) {
+      throw new LockError(
+        "group must not contain NUL, newline, or carriage return characters",
+      );
+    }
+    const resp = await this.sendCmd("listen", pattern, group ?? "");
+    if (resp !== "ok") {
+      throw new LockError(`listen failed: '${resp}'`);
+    }
+  }
+
+  /**
+   * Unsubscribe from signals matching `pattern`.
+   * The `pattern` and `group` must match a previous `listen()` call.
+   */
+  async unlisten(pattern: string, group?: string): Promise<void> {
+    validateKey(pattern);
+    if (group != null && /[\0\n\r]/.test(group)) {
+      throw new LockError(
+        "group must not contain NUL, newline, or carriage return characters",
+      );
+    }
+    const resp = await this.sendCmd("unlisten", pattern, group ?? "");
+    if (resp !== "ok") {
+      throw new LockError(`unlisten failed: '${resp}'`);
+    }
+  }
+
+  /**
+   * Publish a signal on a literal channel (no wildcards).
+   * Returns the number of listeners that received the signal.
+   */
+  async emit(channel: string, payload: string): Promise<number> {
+    validateKey(channel);
+    validatePayload(payload);
+    const resp = await this.sendCmd("signal", channel, payload);
+    if (!resp.startsWith("ok ")) {
+      throw new LockError(`signal failed: '${resp}'`);
+    }
+    const n = parseInt(resp.split(" ")[1], 10);
+    if (!Number.isFinite(n)) {
+      throw new LockError(`signal: bad delivery count: '${resp}'`);
+    }
+    return n;
+  }
+
+  /** Register a listener for incoming signals. */
+  onSignal(listener: (signal: Signal) => void): void {
+    this.signalListeners.push(listener);
+  }
+
+  /** Remove a previously registered signal listener. */
+  offSignal(listener: (signal: Signal) => void): void {
+    const idx = this.signalListeners.indexOf(listener);
+    if (idx >= 0) this.signalListeners.splice(idx, 1);
+  }
+
+  /**
+   * Async iterator that yields signals as they arrive.
+   * Terminates when the connection closes.
+   *
+   * ```ts
+   * for await (const sig of conn) {
+   *   console.log(sig.channel, sig.payload);
+   * }
+   * ```
+   */
+  async *[Symbol.asyncIterator](): AsyncIterableIterator<Signal> {
+    const buffer: Signal[] = [];
+    let waiter: (() => void) | null = null;
+
+    const listener = (sig: Signal) => {
+      buffer.push(sig);
+      if (waiter) {
+        const w = waiter;
+        waiter = null;
+        w();
+      }
+    };
+
+    const onEnd = () => {
+      if (waiter) {
+        const w = waiter;
+        waiter = null;
+        w();
+      }
+    };
+
+    this.onSignal(listener);
+    this.sock.once("close", onEnd);
+
+    try {
+      while (true) {
+        if (buffer.length > 0) {
+          yield buffer.shift()!;
+          continue;
+        }
+        if (this._closed) break;
+        await new Promise<void>((resolve) => {
+          waiter = resolve;
+        });
+      }
+      // Drain any remaining buffered signals.
+      while (buffer.length > 0) {
+        yield buffer.shift()!;
+      }
+    } finally {
+      this.offSignal(listener);
+      this.sock.removeListener("close", onEnd);
+    }
+  }
+
+  /** Close the connection (idempotent). */
+  close(): void {
+    if (this._closed) return;
+    this._closed = true;
+    this.sock.destroy();
+    this.rejectPending(new LockError("connection closed"));
+  }
+
+  /** Whether the connection is closed. */
+  get isClosed(): boolean {
+    return this._closed;
+  }
+
+  // ---- internals ----
+
+  private onData(chunk: Buffer): void {
+    this.buf += chunk.toString("utf-8");
+    if (this.buf.length > MAX_LINE_LENGTH * 2) {
+      this.buf = "";
+      this._closed = true;
+      this.sock.destroy();
+      this.rejectPending(
+        new LockError("server response exceeded maximum buffer size"),
+      );
+      return;
+    }
+    this.drainLines();
+  }
+
+  private drainLines(): void {
+    let idx: number;
+    while ((idx = this.buf.indexOf("\n")) !== -1) {
+      const line = this.buf.slice(0, idx).replace(/\r$/, "");
+      this.buf = this.buf.slice(idx + 1);
+      this.handleLine(line);
+    }
+  }
+
+  private handleLine(line: string): void {
+    if (line.startsWith("sig ")) {
+      const rest = line.slice(4);
+      const spaceIdx = rest.indexOf(" ");
+      if (spaceIdx < 0) return; // malformed push, skip
+      const sig: Signal = {
+        channel: rest.slice(0, spaceIdx),
+        payload: rest.slice(spaceIdx + 1),
+      };
+      for (const listener of [...this.signalListeners]) {
+        try {
+          listener(sig);
+        } catch {
+          // Never let a user callback crash the read loop.
+        }
+      }
+      return;
+    }
+    // Command response.
+    if (this.responseResolve) {
+      const resolve = this.responseResolve;
+      this.responseResolve = null;
+      this.responseReject = null;
+      resolve(line);
+    }
+  }
+
+  private onSocketError(err: Error): void {
+    this._closed = true;
+    this.rejectPending(err);
+  }
+
+  private onSocketEnd(): void {
+    this._closed = true;
+    this.rejectPending(new LockError("server closed connection"));
+  }
+
+  private rejectPending(err: Error): void {
+    if (this.responseReject) {
+      const reject = this.responseReject;
+      this.responseResolve = null;
+      this.responseReject = null;
+      reject(err);
+    }
+  }
+
+  private sendCmd(cmd: string, key: string, arg: string): Promise<string> {
+    return new Promise<string>((outerResolve, outerReject) => {
+      const execute = () => {
+        if (this._closed) {
+          this.cmdBusy = false;
+          this.dequeueNext();
+          outerReject(new LockError("connection closed"));
+          return;
+        }
+        let settled = false;
+        this.responseResolve = (line: string) => {
+          if (settled) return;
+          settled = true;
+          this.cmdBusy = false;
+          this.dequeueNext();
+          outerResolve(line);
+        };
+        this.responseReject = (err: Error) => {
+          if (settled) return;
+          settled = true;
+          this.cmdBusy = false;
+          this.dequeueNext();
+          outerReject(err);
+        };
+        this.sock.write(encodeLines(cmd, key, arg), (err) => {
+          if (err && !settled) {
+            settled = true;
+            this.responseResolve = null;
+            this.responseReject = null;
+            this.cmdBusy = false;
+            this.dequeueNext();
+            outerReject(err);
+          }
+        });
+      };
+
+      if (this.cmdBusy) {
+        this.cmdQueue.push(execute);
+      } else {
+        this.cmdBusy = true;
+        execute();
+      }
+    });
+  }
+
+  private dequeueNext(): void {
+    const next = this.cmdQueue.shift();
+    if (next) {
+      this.cmdBusy = true;
+      next();
+    }
   }
 }

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.10.0] - 2026-03-07
+
+### Added
+
+- Signal (pub/sub) support with NATS-style pattern matching and queue groups
+- `SignalConnection` class for dedicated signal connections with `listen`, `unlisten`, `emit`, `onSignal`/`offSignal`, and async iteration
+- `publish()` low-level function for one-shot signal publishing on a raw socket
+- `Signal` and `SignalConnectionOptions` type exports
+
+### Fixed
+
+- `SignalConnection.onSocketError` did not mark the connection as closed, allowing queued commands to be attempted on a broken socket between the `error` and `close` events
+- `SignalConnection.onData` buffer overflow (>2 MB) cleared the buffer but left the connection open, causing silent protocol stream corruption on subsequent data; now closes the connection
+- `acquire()` and `enqueue()` did not call `close()` when `openConnection()` failed (e.g. ECONNREFUSED), leaving the instance in an inconsistent state with `closed = false` and no socket
+
 ## [v1.9.1] - 2026-02-24
 
 ### Fixed

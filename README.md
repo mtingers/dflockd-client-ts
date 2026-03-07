@@ -356,7 +356,7 @@ import * as net from "net";
 import {
   acquire, enqueue, waitForLock, renew, release,
   semAcquire, semEnqueue, semWaitForLock, semRenew, semRelease,
-  stats,
+  publish, stats,
 } from "dflockd-client";
 
 const sock = net.createConnection({ host: "127.0.0.1", port: 6388 });
@@ -383,8 +383,96 @@ if (semResult.status === "queued") {
   const semGranted = await semWaitForLock(sock, "sem-key", 10); // { token, lease }
 }
 
+// Signal — publish only (no subscription on raw sockets)
+const delivered = await publish(sock, "events.user.login", '{"user":"alice"}');
+
 sock.destroy();
 ```
+
+## Signals
+
+Publish/subscribe messaging with NATS-style pattern matching and optional
+queue groups for load-balanced consumption.
+
+### `SignalConnection` (recommended)
+
+```ts
+import { SignalConnection } from "dflockd-client";
+
+const conn = await SignalConnection.connect();
+
+// Subscribe to signals
+conn.onSignal((sig) => {
+  console.log(`${sig.channel}: ${sig.payload}`);
+});
+
+await conn.listen("events.>");
+
+// ... later
+await conn.unlisten("events.>");
+conn.close();
+```
+
+### Publish a signal
+
+```ts
+import { SignalConnection } from "dflockd-client";
+
+const conn = await SignalConnection.connect();
+const delivered = await conn.emit("events.user.login", '{"user":"alice"}');
+console.log(`delivered to ${delivered} listener(s)`);
+conn.close();
+```
+
+### Pattern matching
+
+Subscription patterns support NATS-style wildcards:
+
+- `*` matches exactly one dot-separated token (`events.*.login` matches
+  `events.user.login` but not `events.user.admin.login`)
+- `>` matches one or more trailing tokens (`events.>` matches
+  `events.user.login` and `events.order.created`)
+
+Publishing always uses literal channel names (no wildcards).
+
+### Queue groups
+
+Listeners can join a named queue group. Within a group, each signal is
+delivered to exactly one member (round-robin), enabling load-balanced
+processing. Non-grouped listeners always receive every matching signal.
+
+```ts
+// Worker 1
+await conn.listen("tasks.>", "workers");
+
+// Worker 2 (same group — only one receives each signal)
+await conn2.listen("tasks.>", "workers");
+```
+
+### Async iterator
+
+`SignalConnection` implements `Symbol.asyncIterator`, so you can consume
+signals with a `for-await-of` loop:
+
+```ts
+const conn = await SignalConnection.connect();
+await conn.listen("events.>");
+
+for await (const sig of conn) {
+  console.log(sig.channel, sig.payload);
+}
+// Loop ends when conn.close() is called
+```
+
+### Signal connection options
+
+| Option             | Type                    | Default        | Description                         |
+|--------------------|-------------------------|----------------|-------------------------------------|
+| `host`             | `string`                | `127.0.0.1`    | Server host                         |
+| `port`             | `number`                | `6388`         | Server port                         |
+| `tls`              | `tls.ConnectionOptions` | `undefined`    | TLS options; pass `{}` for system CA|
+| `auth`             | `string`                | `undefined`    | Auth token                          |
+| `connectTimeoutMs` | `number`                | `undefined`    | TCP connect timeout in milliseconds |
 
 ## License
 

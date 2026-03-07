@@ -1,4 +1,4 @@
-# dflockd-client (TypeScript)
+# dflockd-client
 
 TypeScript client for the [dflockd](https://github.com/mtingers/dflockd) distributed lock daemon.
 

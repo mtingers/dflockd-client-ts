@@ -1454,8 +1454,8 @@ describe("renew failure tears down connection", () => {
       assert.equal(lock.token, "tok1");
 
       // Wait long enough for the renew to fire and fail.
-      // Min renew interval is Math.max(1, lease * ratio) * 1000 = 1000ms.
-      await new Promise((r) => setTimeout(r, 1500));
+      // Min renew interval is Math.max(0.1, lease * ratio) * 1000 = 100ms.
+      await new Promise((r) => setTimeout(r, 500));
 
       // onLockLost should have been called
       assert.equal(lostKey, "k");
@@ -1508,7 +1508,7 @@ describe("renew failure tears down connection", () => {
       await lock.acquire();
       assert.equal(lock.token, "tok1");
 
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, 500));
 
       // Instance should still be cleaned up
       assert.equal(lock.token, null);
@@ -2811,8 +2811,8 @@ describe("socketTimeoutMs triggers socket destruction", () => {
       await lock.acquire();
       assert.equal(lock.token, "tok1");
 
-      // Wait for renew to fire (~1s) and then socket timeout (500ms)
-      await new Promise((r) => setTimeout(r, 2500));
+      // Wait for renew to fire (~100ms) and then socket timeout (500ms)
+      await new Promise((r) => setTimeout(r, 1500));
 
       // Socket timeout should have caused lock lost
       assert.equal(lostKey, "k");

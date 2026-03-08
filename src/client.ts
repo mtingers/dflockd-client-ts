@@ -1,4 +1,5 @@
 import * as net from "net";
+import { StringDecoder } from "string_decoder";
 import * as tls from "tls";
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -100,6 +101,7 @@ function parseLease(value: string | undefined, fallback: number = 30): number {
  * enforces this).
  */
 const _readlineBuf = new WeakMap<net.Socket, string>();
+const _readlineDecoder = new WeakMap<net.Socket, StringDecoder>();
 const MAX_LINE_LENGTH = 1024 * 1024; // 1 MB
 
 function readline(sock: net.Socket): Promise<string> {
@@ -115,8 +117,17 @@ function readline(sock: net.Socket): Promise<string> {
       return;
     }
 
+    // Use a StringDecoder to correctly handle multi-byte UTF-8 characters
+    // that may be split across TCP segment boundaries.
+    let decoder = _readlineDecoder.get(sock);
+    if (!decoder) {
+      decoder = new StringDecoder("utf8");
+      _readlineDecoder.set(sock, decoder);
+    }
+    const dec = decoder;
+
     const onData = (chunk: Buffer) => {
-      buf += chunk.toString("utf-8");
+      buf += dec.write(chunk);
       const idx = buf.indexOf("\n");
       if (idx !== -1) {
         cleanup();
@@ -126,6 +137,7 @@ function readline(sock: net.Socket): Promise<string> {
       } else if (buf.length > MAX_LINE_LENGTH) {
         cleanup();
         _readlineBuf.delete(sock);
+        _readlineDecoder.delete(sock);
         reject(new LockError("server response exceeded maximum line length"));
       }
     };
@@ -133,18 +145,21 @@ function readline(sock: net.Socket): Promise<string> {
     const onError = (err: Error) => {
       cleanup();
       _readlineBuf.delete(sock);
+      _readlineDecoder.delete(sock);
       reject(err);
     };
 
     const onClose = () => {
       cleanup();
       _readlineBuf.delete(sock);
+      _readlineDecoder.delete(sock);
       reject(new LockError("server closed connection"));
     };
 
     const onEnd = () => {
       cleanup();
       _readlineBuf.delete(sock);
+      _readlineDecoder.delete(sock);
       reject(new LockError("server closed connection"));
     };
 
@@ -159,6 +174,7 @@ function readline(sock: net.Socket): Promise<string> {
     // started reading), the 'end'/'close' events won't fire again.
     if (sock.readableEnded || sock.destroyed) {
       _readlineBuf.delete(sock);
+      _readlineDecoder.delete(sock);
       reject(new LockError("server closed connection"));
       return;
     }
@@ -1007,11 +1023,11 @@ abstract class DistributedPrimitive {
       // schedule another iteration (avoids clobbering a new acquire's timer).
       if (this.closed || this.token !== savedToken) return;
       const elapsed = Date.now() - start;
-      const interval = Math.max(1, this.lease * this.renewRatio) * 1000;
+      const interval = Math.max(0.1, this.lease * this.renewRatio) * 1000;
       this.renewTimer = setTimeout(loop, Math.max(0, interval - elapsed));
       this.renewTimer.unref();
     };
-    const interval = Math.max(1, this.lease * this.renewRatio) * 1000;
+    const interval = Math.max(0.1, this.lease * this.renewRatio) * 1000;
     this.renewTimer = setTimeout(loop, interval);
     this.renewTimer.unref();
   }
@@ -1179,6 +1195,7 @@ export interface SignalConnectionOptions {
 export class SignalConnection {
   private sock: net.Socket;
   private buf = "";
+  private decoder: StringDecoder;
   private responseResolve: ((line: string) => void) | null = null;
   private responseReject: ((err: Error) => void) | null = null;
   private cmdQueue: Array<() => void> = [];
@@ -1194,6 +1211,12 @@ export class SignalConnection {
    */
   constructor(sock: net.Socket) {
     this.sock = sock;
+
+    // Take over the readline StringDecoder to preserve any held-back bytes
+    // from a multi-byte UTF-8 character split across TCP segments.
+    const prevDecoder = _readlineDecoder.get(sock);
+    this.decoder = prevDecoder ?? new StringDecoder("utf8");
+    _readlineDecoder.delete(sock);
 
     // Drain any leftover buffer from the global readline WeakMap.
     const leftover = _readlineBuf.get(sock);
@@ -1367,7 +1390,7 @@ export class SignalConnection {
   // ---- internals ----
 
   private onData(chunk: Buffer): void {
-    this.buf += chunk.toString("utf-8");
+    this.buf += this.decoder.write(chunk);
     if (this.buf.length > MAX_LINE_LENGTH * 2) {
       this.buf = "";
       this._closed = true;

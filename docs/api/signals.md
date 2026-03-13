@@ -15,6 +15,7 @@ Connect to a dflockd server and return a `SignalConnection`.
 | `tls` | `tls.ConnectionOptions` | `undefined` | TLS options; pass `{}` for system CA |
 | `auth` | `string` | `undefined` | Auth token |
 | `connectTimeoutMs` | `number` | `undefined` | TCP connect timeout in milliseconds |
+| `heartbeatIntervalMs` | `number` | `15000` | Interval between keepalive pings (ms); set to `0` to disable |
 
 ```ts
 import { SignalConnection } from "dflockd-client";

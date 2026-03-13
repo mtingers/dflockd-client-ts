@@ -1177,6 +1177,12 @@ export interface SignalConnectionOptions {
   auth?: string;
   /** TCP connect timeout in milliseconds. */
   connectTimeoutMs?: number;
+  /**
+   * Interval in milliseconds between heartbeat pings sent to the server to
+   * keep idle signal connections alive (default `15000`).  Set to `0` to
+   * disable the heartbeat.
+   */
+  heartbeatIntervalMs?: number;
 }
 
 /**
@@ -1202,14 +1208,19 @@ export class SignalConnection {
   private cmdBusy = false;
   private signalListeners: Array<(signal: Signal) => void> = [];
   private _closed = false;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
    * Wrap an existing socket as a SignalConnection.
    *
    * The socket should already be connected (and authenticated, if needed).
    * Prefer `SignalConnection.connect()` for convenience.
+   *
+   * @param sock - Connected socket.
+   * @param heartbeatIntervalMs - Interval between keepalive pings (default
+   *   `15000`).  Set to `0` to disable.
    */
-  constructor(sock: net.Socket) {
+  constructor(sock: net.Socket, heartbeatIntervalMs = 15_000) {
     this.sock = sock;
 
     // Take over the readline StringDecoder to preserve any held-back bytes
@@ -1232,6 +1243,15 @@ export class SignalConnection {
 
     // Process any lines already buffered.
     this.drainLines();
+
+    // Start heartbeat to keep idle signal connections alive.
+    if (heartbeatIntervalMs > 0) {
+      this.heartbeatTimer = setInterval(() => {
+        if (this._closed) return;
+        this.sendCmd("ping", "_", "").catch(() => {});
+      }, heartbeatIntervalMs);
+      this.heartbeatTimer.unref();
+    }
   }
 
   /** Connect to a dflockd server and return a SignalConnection. */
@@ -1247,7 +1267,7 @@ export class SignalConnection {
       opts?.auth,
       opts?.connectTimeoutMs,
     );
-    return new SignalConnection(sock);
+    return new SignalConnection(sock, opts?.heartbeatIntervalMs ?? 15_000);
   }
 
   /**
@@ -1378,6 +1398,10 @@ export class SignalConnection {
   close(): void {
     if (this._closed) return;
     this._closed = true;
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
     this.sock.destroy();
     this.rejectPending(new LockError("connection closed"));
   }
@@ -1441,11 +1465,19 @@ export class SignalConnection {
 
   private onSocketError(err: Error): void {
     this._closed = true;
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
     this.rejectPending(err);
   }
 
   private onSocketEnd(): void {
     this._closed = true;
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
     this.rejectPending(new LockError("server closed connection"));
   }
 
